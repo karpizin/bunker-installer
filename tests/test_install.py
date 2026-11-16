@@ -22,15 +22,19 @@ class InstallEntryTests(unittest.TestCase):
         (self.tools / "id").write_text("#!/bin/sh\necho 0\n")
         (self.tools / "python3").write_text(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGUMENT_LOG\"\n"
+            "shasum -a 256 \"$1\" > \"$COPY_HASH_LOG\"\n"
         )
         (self.tools / "sha256sum").write_text(
             "#!/bin/sh\nread expected file\nactual=$(shasum -a 256 \"$file\") || exit 1\n"
-            "[ \"${actual%% *}\" = \"$expected\" ]\n"
+            "[ \"${actual%% *}\" = \"$expected\" ] || exit 1\n"
+            "[ -z \"${TAMPER_SOURCE:-}\" ] || printf 'tampered\\n' > \"$TAMPER_SOURCE\"\n"
         )
         for tool in self.tools.iterdir():
             tool.chmod(0o755)
         self.log = self.root / "arguments"
-        self.env = dict(os.environ, PATH=f"{self.tools}:{os.environ['PATH']}", ARGUMENT_LOG=str(self.log))
+        self.copy_hash_log = self.root / "copy-hash"
+        self.env = dict(os.environ, PATH=f"{self.tools}:{os.environ['PATH']}",
+                        ARGUMENT_LOG=str(self.log), COPY_HASH_LOG=str(self.copy_hash_log))
 
     def run_install(self, *args):
         return subprocess.run(["sh", str(self.root / "install.sh"), *args],
@@ -43,10 +47,22 @@ class InstallEntryTests(unittest.TestCase):
                 result = self.run_install(stage)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 arguments = self.log.read_text().splitlines()
-                self.assertEqual(Path(arguments[0]).resolve(), (self.root / "product-bootstrap.py").resolve())
+                self.assertNotEqual(Path(arguments[0]).resolve(), (self.root / "product-bootstrap.py").resolve())
+                self.assertTrue(arguments[0].startswith("/tmp/bunker-bootstrap."))
+                self.assertFalse(Path(arguments[0]).exists())
                 self.assertEqual(arguments[-1], stage)
                 self.assertIn("--signature-url", arguments)
                 self.assertIn("--public-key-url", arguments)
+
+    def test_source_replacement_after_copy_cannot_change_executed_bytes(self):
+        self.env["TAMPER_SOURCE"] = str(self.root / "product-bootstrap.py")
+        result = self.run_install("--prepare")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "product-bootstrap.py").read_text(), "tampered\n")
+        self.assertTrue(self.copy_hash_log.read_text().startswith(
+            "939a33520f9b92e2a3f58fb4d3e687eb3cc5504e2ad049fa1222a2fbb6bfbcad "
+        ))
+        self.assertFalse(Path(self.log.read_text().splitlines()[0]).exists())
 
     def test_missing_or_changed_bootstrap_never_executes(self):
         bootstrap = self.root / "product-bootstrap.py"

@@ -14,7 +14,9 @@ and real hardware sources remain explicit readiness gates.
 The four-stage entry point is now staged here as `install.sh` together with
 `product-bootstrap.py`. The helper is an unchanged copy of the Ops bootstrap
 with SHA-256 `939a33520f9b92e2a3f58fb4d3e687eb3cc5504e2ad049fa1222a2fbb6bfbcad`.
-The shell script checks this digest before invoking it. It never downloads
+The shell script copies the helper into a private root-owned temporary directory,
+checks the copy's digest, executes that copy, and removes it afterward; changing
+the bundle after the copy cannot change the executed bytes. It never downloads
 executable code. The helper pins the product signing key, verifies the signed
 manifest, downloads the Ops source by its signed size and SHA-256, and only
 then runs the staged Ops installer. A missing or invalid signature fails closed.

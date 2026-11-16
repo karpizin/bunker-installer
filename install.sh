@@ -37,14 +37,20 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     exit 1
 fi
 bootstrap_sha256='939a33520f9b92e2a3f58fb4d3e687eb3cc5504e2ad049fa1222a2fbb6bfbcad'
-if ! printf '%s  %s\n' "$bootstrap_sha256" "$bootstrap" | sha256sum --check --status; then
+umask 077
+temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
+trap 'rm -rf -- "$temporary"' 0
+trap 'exit 1' 1 2 3 15
+trusted_bootstrap="$temporary/product-bootstrap.py"
+cp -- "$bootstrap" "$trusted_bootstrap"
+chmod 0400 "$trusted_bootstrap"
+if ! printf '%s  %s\n' "$bootstrap_sha256" "$trusted_bootstrap" | sha256sum --check --status; then
     printf '%s\n' 'Bundled bootstrap SHA-256 mismatch; refusing to execute.' >&2
     exit 1
 fi
 
-umask 077
 release='https://github.com/karpizin/bunker-installer/releases/download/v1.0.0'
-exec python3 "$bootstrap" \
+python3 "$trusted_bootstrap" \
     --manifest-url "$release/release-1.0.0.json" \
     --signature-url "$release/release-1.0.0.sig" \
     --public-key-url "$release/bunker-product-release-2026.pem" \
