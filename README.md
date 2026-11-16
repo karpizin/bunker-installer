@@ -1,9 +1,11 @@
 # Bunker AI installer
 
-**Release preparation in progress.** This repository is private until the
-signed 1.0.0 manifest, all published image and file digests, and the AMD
-installation acceptance are complete. Do not treat a source branch or an
-individual component tag as a released appliance.
+**Release preparation in progress.** This repository may host publicly
+downloadable *candidate* assets so their final URLs can be independently
+checked. A candidate asset or prerelease is not an accepted appliance. Bunker
+AI 1.0.0 is not released until the product manifest is signed, the published
+installation is accepted on AMD, and the final release is explicitly published.
+Do not treat a source branch or an individual component tag as a release.
 
 The installer targets AMD Ryzen AI Max+ 395, verifies the signed disk budget,
 Vulkan, and Ubuntu 20.04, 22.04, 24.04, or 26.04. It will provide separate
