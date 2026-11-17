@@ -82,6 +82,24 @@ class InstallEntryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertFalse(self.log.exists())
 
+    def test_candidate_tag_uses_only_the_public_prerelease_path(self):
+        self.env["BUNKER_RELEASE_TAG"] = "v1.0.0-rc2"
+        result = self.run_install("--prepare")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        self.assertIn("https://github.com/karpizin/bunker-installer/releases/download/"
+                      "v1.0.0-rc2/release-1.0.0.json", arguments)
+
+    def test_invalid_release_tag_never_executes(self):
+        for value in ("v1.0.0-rc0", "v1.0.0-rc1/../../other", "https://example.invalid/x"):
+            with self.subTest(value=value):
+                self.log.unlink(missing_ok=True)
+                self.env["BUNKER_RELEASE_TAG"] = value
+                result = self.run_install("--prepare")
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("Invalid BUNKER_RELEASE_TAG", result.stderr)
+                self.assertFalse(self.log.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

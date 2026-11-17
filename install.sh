@@ -49,7 +49,13 @@ if ! printf '%s  %s\n' "$bootstrap_sha256" "$trusted_bootstrap" | sha256sum --ch
     exit 1
 fi
 
-release='https://github.com/karpizin/bunker-installer/releases/download/v1.0.0'
+release_tag=${BUNKER_RELEASE_TAG:-v1.0.0}
+if [ "$release_tag" != 'v1.0.0' ] &&
+   ! printf '%s\n' "$release_tag" | grep -Eq '^v1\.0\.0-rc[1-9][0-9]*$'; then
+    printf '%s\n' 'Invalid BUNKER_RELEASE_TAG; use v1.0.0 or a 1.0.0 prerelease tag.' >&2
+    exit 2
+fi
+release="https://github.com/karpizin/bunker-installer/releases/download/$release_tag"
 python3 "$trusted_bootstrap" \
     --manifest-url "$release/release-1.0.0.json" \
     --signature-url "$release/release-1.0.0.sig" \

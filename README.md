@@ -39,3 +39,11 @@ sources can be supplied and checked before module activation. Do not pipe
 `install.sh` alone into a shell: its bundled helper is required. The release
 assets and acceptance are not yet complete, so these commands are documentation
 of the intended flow, not a published installation instruction.
+
+For an explicitly selected 1.0.0 prerelease acceptance run, an operator may
+set `BUNKER_RELEASE_TAG` to a `v1.0.0-rcN` tag (for example,
+`sudo env BUNKER_RELEASE_TAG=v1.0.0-rc2 sh install.sh --prepare`). This changes
+only the fixed GitHub Release path; signature and pinned bootstrap checks are
+unchanged. Without this variable the installer always targets `v1.0.0`.
+Prerelease installation must be isolated from an existing appliance and must
+not be represented as a completed public release.
