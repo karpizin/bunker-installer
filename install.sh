@@ -56,13 +56,22 @@ if [ "$release_tag" != 'v1.0.0' ] &&
     exit 2
 fi
 release="https://github.com/karpizin/bunker-installer/releases/download/$release_tag"
+acceptance_id=${BUNKER_ACCEPTANCE_ID:-}
+root=''
+if [ -n "$acceptance_id" ]; then
+    if ! printf '%s\n' "$acceptance_id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'; then
+        printf '%s\n' 'Invalid BUNKER_ACCEPTANCE_ID; use one safe path component.' >&2
+        exit 2
+    fi
+    root="/var/lib/bunker-acceptance/$acceptance_id"
+fi
 python3 "$trusted_bootstrap" \
     --manifest-url "$release/release-1.0.0.json" \
     --signature-url "$release/release-1.0.0.sig" \
     --public-key-url "$release/bunker-product-release-2026.pem" \
-    --cache /var/cache/bunker-ai/1.0.0 \
-    --ops-root /opt/bunker/releases \
-    --source-root /opt/bunker/module-sources \
-    --install-root /opt/bunker \
-    --state-root /var/lib/bunker-platform \
+    --cache "$root/var/cache/bunker-ai/1.0.0" \
+    --ops-root "$root/opt/bunker/releases" \
+    --source-root "$root/opt/bunker/module-sources" \
+    --install-root "$root/opt/bunker" \
+    --state-root "$root/var/lib/bunker-platform" \
     "$1"
