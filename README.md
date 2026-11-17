@@ -47,3 +47,12 @@ only the fixed GitHub Release path; signature and pinned bootstrap checks are
 unchanged. Without this variable the installer always targets `v1.0.0`.
 Prerelease installation must be isolated from an existing appliance and must
 not be represented as a completed public release.
+
+For that acceptance run, set `BUNKER_ACCEPTANCE_ID` to a short safe name such
+as `release-100-rc3`. The installer places its cache, staged sources, program
+files and platform state under `/var/lib/bunker-acceptance/<id>/` instead of
+the normal paths. This separates files, **not host-level services, Docker or
+GPU ownership**. Do not activate the candidate concurrently with a working
+installation: first preserve its recovery evidence, stop it in a controlled
+maintenance window, and verify rollback. A successful `--prepare` alone is
+not acceptance of activation.

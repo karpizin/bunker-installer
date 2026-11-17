@@ -100,6 +100,27 @@ class InstallEntryTests(unittest.TestCase):
                 self.assertIn("Invalid BUNKER_RELEASE_TAG", result.stderr)
                 self.assertFalse(self.log.exists())
 
+    def test_acceptance_id_routes_all_paths_to_isolated_tree(self):
+        self.env["BUNKER_ACCEPTANCE_ID"] = "release-100-rc3"
+        result = self.run_install("--prepare")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        root = "/var/lib/bunker-acceptance/release-100-rc3"
+        for path in ("var/cache/bunker-ai/1.0.0", "opt/bunker/releases",
+                     "opt/bunker/module-sources", "opt/bunker",
+                     "var/lib/bunker-platform"):
+            self.assertIn(f"{root}/{path}", arguments)
+
+    def test_unsafe_acceptance_id_never_executes(self):
+        for value in ("../current", "a/b", ".hidden"):
+            with self.subTest(value=value):
+                self.log.unlink(missing_ok=True)
+                self.env["BUNKER_ACCEPTANCE_ID"] = value
+                result = self.run_install("--prepare")
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("Invalid BUNKER_ACCEPTANCE_ID", result.stderr)
+                self.assertFalse(self.log.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
