@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -74,6 +75,29 @@ class BootstrapTests(unittest.TestCase):
 
     def download(self, url, destination, *, resume):
         shutil.copyfile(self.urls[url], destination)
+
+    def test_acceptance_paths_allow_service_traversal_without_listing(self):
+        base = self.root / "acceptance"
+        base.mkdir(mode=0o700)
+        target = base / "rc5"
+        bootstrap.prepare_acceptance_service_paths(target)
+        for path in (base, target, target / "opt", target / "opt/bunker",
+                     target / "opt/bunker/platform", target / "opt/bunker/platform/bin",
+                     target / "var", target / "var/lib"):
+            mode = stat.S_IMODE(path.stat().st_mode)
+            self.assertTrue(mode & stat.S_IXOTH, path)
+            self.assertFalse(mode & stat.S_IROTH, path)
+        bootstrap.prepare_acceptance_service_paths(target)
+
+    def test_acceptance_path_symlink_is_rejected(self):
+        base = self.root / "acceptance"
+        base.mkdir(mode=0o700)
+        outside = self.root / "outside"
+        outside.mkdir(mode=0o700)
+        (base / "rc5").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(bootstrap.BootstrapError, "symbolic link"):
+            bootstrap.prepare_acceptance_service_paths(base / "rc5")
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o700)
 
     def test_signed_bootstrap_reuses_exact_source_and_rejects_local_drift(self):
         with patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \

@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -264,6 +265,19 @@ def run_product_step(target: Path, cache: Path, ops_root: Path, source_root: Pat
                         str(source_root), "--state-root", str(state_root)], check=True)
 
 
+def prepare_acceptance_service_paths(root: Path) -> None:
+    # Service users need traversal, not listing access, through the isolated root.
+    for path in (root.parent, root, root / "opt", root / "opt/bunker",
+                 root / "opt/bunker/platform", root / "opt/bunker/platform/bin",
+                 root / "var", root / "var/lib"):
+        if path.is_symlink():
+            raise BootstrapError(f"acceptance path is a symbolic link: {path}")
+        path.mkdir(mode=0o700, exist_ok=True)
+        if not path.is_dir() or path.is_symlink():
+            raise BootstrapError(f"acceptance path is not a safe directory: {path}")
+        path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IXOTH)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest-url", required=True)
@@ -286,6 +300,9 @@ def main() -> int:
     if not args.prepare and args.state_root is None:
         parser.error("activation requires --state-root")
     try:
+        acceptance_root = args.install_root.parent.parent
+        if acceptance_root.parent == Path("/var/lib/bunker-acceptance"):
+            prepare_acceptance_service_paths(acceptance_root)
         target = bootstrap(args.manifest_url, args.signature_url, args.public_key_url,
                            args.cache, args.ops_root)
         if args.prepare:

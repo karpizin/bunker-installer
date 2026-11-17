@@ -36,7 +36,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='939a33520f9b92e2a3f58fb4d3e687eb3cc5504e2ad049fa1222a2fbb6bfbcad'
+bootstrap_sha256='dfd1b974a809cd2489af417c5056379e9e3c19d0d764eafb9d856b69c59e5267'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
