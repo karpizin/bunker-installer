@@ -64,7 +64,7 @@ class InstallEntryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root / "product-bootstrap.py").read_text(), "tampered\n")
         self.assertTrue(self.copy_hash_log.read_text().startswith(
-            "939a33520f9b92e2a3f58fb4d3e687eb3cc5504e2ad049fa1222a2fbb6bfbcad "
+            "dfd1b974a809cd2489af417c5056379e9e3c19d0d764eafb9d856b69c59e5267 "
         ))
         self.assertFalse(Path(self.log.read_text().splitlines()[0]).exists())
 
