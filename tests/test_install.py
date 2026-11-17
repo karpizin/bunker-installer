@@ -22,6 +22,7 @@ class InstallEntryTests(unittest.TestCase):
         (self.tools / "id").write_text("#!/bin/sh\necho 0\n")
         (self.tools / "python3").write_text(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGUMENT_LOG\"\n"
+            "printf '%s\\n' \"${PYTHONDONTWRITEBYTECODE:-}\" > \"$BYTECODE_LOG\"\n"
             "shasum -a 256 \"$1\" > \"$COPY_HASH_LOG\"\n"
         )
         (self.tools / "sha256sum").write_text(
@@ -33,8 +34,10 @@ class InstallEntryTests(unittest.TestCase):
             tool.chmod(0o755)
         self.log = self.root / "arguments"
         self.copy_hash_log = self.root / "copy-hash"
+        self.bytecode_log = self.root / "bytecode"
         self.env = dict(os.environ, PATH=f"{self.tools}:{os.environ['PATH']}",
-                        ARGUMENT_LOG=str(self.log), COPY_HASH_LOG=str(self.copy_hash_log))
+                        ARGUMENT_LOG=str(self.log), COPY_HASH_LOG=str(self.copy_hash_log),
+                        BYTECODE_LOG=str(self.bytecode_log))
 
     def run_install(self, *args):
         return subprocess.run(["sh", str(self.root / "install.sh"), *args],
@@ -53,6 +56,7 @@ class InstallEntryTests(unittest.TestCase):
                 self.assertEqual(arguments[-1], stage)
                 self.assertIn("--signature-url", arguments)
                 self.assertIn("--public-key-url", arguments)
+                self.assertEqual(self.bytecode_log.read_text(), "1\n")
 
     def test_source_replacement_after_copy_cannot_change_executed_bytes(self):
         self.env["TAMPER_SOURCE"] = str(self.root / "product-bootstrap.py")

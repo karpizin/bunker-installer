@@ -56,6 +56,8 @@ if [ "$release_tag" != 'v1.0.0' ] &&
     exit 2
 fi
 release="https://github.com/karpizin/bunker-installer/releases/download/$release_tag"
+# The verified Ops source must remain byte-for-byte unchanged during staging.
+export PYTHONDONTWRITEBYTECODE=1
 acceptance_id=${BUNKER_ACCEPTANCE_ID:-}
 root=''
 if [ -n "$acceptance_id" ]; then
