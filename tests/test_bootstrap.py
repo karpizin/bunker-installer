@@ -109,6 +109,59 @@ class BootstrapTests(unittest.TestCase):
             with self.assertRaisesRegex(bootstrap.BootstrapError, "installed Ops source differs"):
                 bootstrap.bootstrap(*self.arguments)
 
+    def test_configure_uses_signed_11_manifest_and_stages_only_chooser(self):
+        script = b"""import argparse, json
+from pathlib import Path
+cli = argparse.ArgumentParser()
+for name in ("manifest", "signature", "public-key", "profile", "choices-json"):
+    cli.add_argument("--" + name, type=Path)
+cli.add_argument("--non-interactive", action="store_true")
+args = cli.parse_args()
+assert args.non_interactive and args.signature.is_file() and args.public_key.is_file()
+assert json.loads(args.manifest.read_bytes())["platform_release"]["version"] == "1.1.0"
+args.profile.write_text(args.choices_json.read_text())
+"""
+        with tarfile.open(self.archive, "w:gz") as package:
+            for name, payload in (("VERSION", b"0.2.25\n"), ("scripts/install/product-setup.py", script)):
+                entry = tarfile.TarInfo("bunker-ops-0.2.25/" + name)
+                entry.size = len(payload)
+                package.addfile(entry, io.BytesIO(payload))
+        document = json.loads(self.manifest.read_bytes())
+        document.update(schema_version="bunker.appliance-release/v2", platform_release={"version": "1.1.0"},
+                        installation_catalog={"schema_version": "bunker.install-catalog/v2"})
+        document["distribution"]["ops_source"].update(size_bytes=self.archive.stat().st_size,
+                                                      sha256=bootstrap.sha256(self.archive))
+        self.manifest.write_text(json.dumps(document))
+        subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(self.private),
+                        "-out", str(self.signature), str(self.manifest)], check=True, capture_output=True)
+        choices = self.root / "selected models.json"
+        choices.write_text('{"models":["alpha","beta"]}')
+        profile = self.root / "profile.json"
+        with patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \
+                patch.object(bootstrap, "curl", side_effect=self.download):
+            target = bootstrap.configure_product(*self.arguments, profile, non_interactive=True,
+                                                 choices=choices, probe_download=False)
+            self.assertTrue((target / "scripts/install/product-setup.py").is_file())
+            self.assertEqual(profile.read_text(), choices.read_text())
+            self.assertFalse((self.root / "cache/trust").exists())
+            self.assertFalse((target / "scripts/install/__pycache__").exists())
+            profile.unlink()
+            self.manifest.write_text("{}")
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "signature verification failed"):
+                bootstrap.configure_product(*self.arguments, profile, non_interactive=True,
+                                            choices=choices, probe_download=False)
+            self.assertFalse(profile.exists())
+
+    def test_configure_refuses_even_a_validly_signed_10_release(self):
+        profile = self.root / "profile.json"
+        with patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \
+                patch.object(bootstrap, "curl", side_effect=self.download) as fetch:
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "not a production Bunker AI 1.1.0"):
+                bootstrap.configure_product(*self.arguments, profile, non_interactive=False,
+                                            choices=None, probe_download=False)
+            self.assertEqual(fetch.call_count, 3)
+            self.assertFalse(profile.exists())
+
     def test_bad_key_or_signature_stops_before_ops_download(self):
         fetched = []
 

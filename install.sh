@@ -4,6 +4,7 @@ set -eu
 
 usage() {
     printf '%s\n' 'Usage: sudo sh install.sh --prepare|--install-platform|--initialize-n8n|--activate-modules' \
+        '       sudo sh install.sh --configure [--non-interactive [--choices-json FILE]] [--probe-download]' \
         'Use the complete release bundle; piping this script alone to sh is unsupported.'
 }
 
@@ -11,12 +12,35 @@ if [ "${1:-}" = '--help' ]; then
     usage
     exit 0
 fi
-if [ "$#" -ne 1 ]; then
+if [ "$#" -eq 0 ]; then
     usage >&2
     exit 2
 fi
-case "$1" in
-    --prepare|--install-platform|--initialize-n8n|--activate-modules) ;;
+action=$1
+shift
+version=1.0.0
+non_interactive='' choices='' probe_download=''
+case "$action" in
+    --configure)
+        version=1.1.0
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --non-interactive) non_interactive=--non-interactive ;;
+                --probe-download) probe_download=--probe-download ;;
+                --choices-json)
+                    if [ "$#" -lt 2 ] || [ -z "$2" ]; then usage >&2; exit 2; fi
+                    choices=$2
+                    shift
+                    ;;
+                *) usage >&2; exit 2 ;;
+            esac
+            shift
+        done
+        if [ -n "$choices" ] && [ -z "$non_interactive" ]; then usage >&2; exit 2; fi
+        ;;
+    --prepare|--install-platform|--initialize-n8n|--activate-modules)
+        if [ "$#" -ne 0 ]; then usage >&2; exit 2; fi
+        ;;
     *) usage >&2; exit 2 ;;
 esac
 if [ "$(id -u)" -ne 0 ]; then
@@ -36,7 +60,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='dfd1b974a809cd2489af417c5056379e9e3c19d0d764eafb9d856b69c59e5267'
+bootstrap_sha256='a044b002362dc2f892f8ad092c96e4207469974f9b1f134e09916f8bf476627a'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
@@ -49,10 +73,14 @@ if ! printf '%s  %s\n' "$bootstrap_sha256" "$trusted_bootstrap" | sha256sum --ch
     exit 1
 fi
 
-release_tag=${BUNKER_RELEASE_TAG:-v1.0.0}
-if [ "$release_tag" != 'v1.0.0' ] &&
-   ! printf '%s\n' "$release_tag" | grep -Eq '^v1\.0\.0-rc[1-9][0-9]*$'; then
-    printf '%s\n' 'Invalid BUNKER_RELEASE_TAG; use v1.0.0 or a 1.0.0 prerelease tag.' >&2
+release_tag=${BUNKER_RELEASE_TAG:-v$version}
+case "$version" in
+    1.0.0) prerelease='^v1\.0\.0-rc[1-9][0-9]*$' ;;
+    1.1.0) prerelease='^v1\.1\.0-rc[1-9][0-9]*$' ;;
+esac
+if [ "$release_tag" != "v$version" ] &&
+   ! printf '%s\n' "$release_tag" | grep -Eq "$prerelease"; then
+    printf '%s\n' "Invalid BUNKER_RELEASE_TAG; expected v$version or its prerelease tag." >&2
     exit 2
 fi
 release="https://github.com/karpizin/bunker-installer/releases/download/$release_tag"
@@ -67,13 +95,19 @@ if [ -n "$acceptance_id" ]; then
     fi
     root="/var/lib/bunker-acceptance/$acceptance_id"
 fi
+if [ "$action" = '--configure' ]; then
+    set -- "$action" --profile "$root/var/lib/bunker-installer/$version/selection.json"
+    if [ -n "$non_interactive" ]; then set -- "$@" "$non_interactive"; fi
+    if [ -n "$choices" ]; then set -- "$@" "--choices-json=$choices"; fi
+    if [ -n "$probe_download" ]; then set -- "$@" "$probe_download"; fi
+    ops_root="$root/opt/bunker/selection-releases"
+else
+    set -- --source-root "$root/opt/bunker/module-sources" \
+        --install-root "$root/opt/bunker" --state-root "$root/var/lib/bunker-platform" "$action"
+    ops_root="$root/opt/bunker/releases"
+fi
 python3 "$trusted_bootstrap" \
-    --manifest-url "$release/release-1.0.0.json" \
-    --signature-url "$release/release-1.0.0.sig" \
+    --manifest-url "$release/release-$version.json" \
+    --signature-url "$release/release-$version.sig" \
     --public-key-url "$release/bunker-product-release-2026.pem" \
-    --cache "$root/var/cache/bunker-ai/1.0.0" \
-    --ops-root "$root/opt/bunker/releases" \
-    --source-root "$root/opt/bunker/module-sources" \
-    --install-root "$root/opt/bunker" \
-    --state-root "$root/var/lib/bunker-platform" \
-    "$1"
+    --cache "$root/var/cache/bunker-ai/$version" --ops-root "$ops_root" "$@"
