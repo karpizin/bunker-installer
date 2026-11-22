@@ -1,30 +1,31 @@
 # Bunker AI installer
 
-**Release preparation in progress.** This repository may host publicly
-downloadable *candidate* assets so their final URLs can be independently
-checked. A candidate asset or prerelease is not an accepted appliance. Bunker
-AI 1.0.0 is not released until the product manifest is signed, the published
-installation is accepted on AMD, and the final release is explicitly published.
-Do not treat a source branch or an individual component tag as a release.
+**Bunker AI 1.0.0 is released.** Use the signed assets and known-limitations
+notes in the [v1.0.0 release](https://github.com/karpizin/bunker-installer/releases/tag/v1.0.0).
+The GA assets are byte-identical to the accepted RC22 candidate; the signed
+manifest still references pinned files on earlier RC tags. Those releases
+must remain publicly available. A source branch or component tag alone is
+not a product release.
 
 The installer targets AMD Ryzen AI Max+ 395, verifies the signed disk budget,
-Vulkan, and Ubuntu 20.04, 22.04, 24.04, or 26.04. It will provide separate
+Vulkan, and Ubuntu 20.04, 22.04, 24.04, or 26.04. Full hardware acceptance was
+performed on the AMD target, not on every listed Ubuntu version. It provides separate
 stages for signed preparation, base-platform activation, initial n8n owner
 setup, and physical module activation. Customer keys, Coder workspace ACL,
 and real hardware sources remain explicit readiness gates.
 
-The four-stage entry point is now staged here as `install.sh` together with
-`product-bootstrap.py`. The helper is an unchanged copy of the Ops bootstrap
-with SHA-256 `939a33520f9b92e2a3f58fb4d3e687eb3cc5504e2ad049fa1222a2fbb6bfbcad`.
+Download `install.sh` and `product-bootstrap.py` from the same v1.0.0 release
+into one directory. The bundled helper has SHA-256
+`dfd1b974a809cd2489af417c5056379e9e3c19d0d764eafb9d856b69c59e5267`.
 The shell script copies the helper into a private root-owned temporary directory,
 checks the copy's digest, executes that copy, and removes it afterward; changing
-the bundle after the copy cannot change the executed bytes. It never downloads
-executable code. The helper pins the product signing key, verifies the signed
+the bundle after the copy cannot change the executed bytes. The shell entry
+point itself does not execute downloaded code before the trust check. The
+helper pins the product signing key, verifies the signed
 manifest, downloads the Ops source by its signed size and SHA-256, and only
 then runs the staged Ops installer. A missing or invalid signature fails closed.
 
-Once the complete signed release bundle is published, use these stages in
-order on the supported Ubuntu target:
+Run these stages in order on the target Ubuntu host:
 
 ```sh
 sudo sh install.sh --prepare
@@ -36,9 +37,11 @@ sudo sh install.sh --activate-modules
 Each command revalidates trust. Preparation does not activate services;
 subsequent stages are separate so owner credentials, Coder ACL and physical
 sources can be supplied and checked before module activation. Do not pipe
-`install.sh` alone into a shell: its bundled helper is required. The release
-assets and acceptance are not yet complete, so these commands are documentation
-of the intended flow, not a published installation instruction.
+`install.sh` alone into a shell: its bundled helper is required. On an already
+installed appliance with a completed Wikipedia index, a same-release
+`--install-platform` rerun can fail; see the [known limitation](https://github.com/karpizin/bunker-ops/issues/178)
+before using it as a repair step. Clean-host installation from removable media
+is not part of this release's validated scope.
 
 For an explicitly selected 1.0.0 prerelease acceptance run, an operator may
 set `BUNKER_RELEASE_TAG` to a `v1.0.0-rcN` tag (for example,
