@@ -106,7 +106,8 @@ class InstallEntryTests(unittest.TestCase):
 
     def test_configure_uses_isolated_11_catalog_and_passes_choices_as_data(self):
         self.env.update(BUNKER_RELEASE_TAG="v1.1.0-rc1", BUNKER_ACCEPTANCE_ID="release-11")
-        result = self.run_install("--configure", "--non-interactive", "--choices-json", "/tmp/with spaces.json")
+        result = self.run_install("--configure", "--non-interactive", "--choices-json", "/tmp/with spaces.json",
+                                  "--space-root", "/mnt/target volume")
         self.assertEqual(result.returncode, 0, result.stderr)
         arguments = self.log.read_text().splitlines()
         self.assertIn("https://github.com/karpizin/bunker-installer/releases/download/"
@@ -114,6 +115,7 @@ class InstallEntryTests(unittest.TestCase):
         self.assertIn("/var/lib/bunker-acceptance/release-11/opt/bunker/selection-releases", arguments)
         self.assertIn("/var/lib/bunker-acceptance/release-11/var/lib/bunker-installer/1.1.0/selection.json", arguments)
         self.assertIn("--choices-json=/tmp/with spaces.json", arguments)
+        self.assertIn("--space-root=/mnt/target volume", arguments)
         self.assertIn("--non-interactive", arguments)
         self.assertNotIn("--install-root", arguments)
         self.assertNotIn("--activate-modules", arguments)

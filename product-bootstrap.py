@@ -227,7 +227,8 @@ def bootstrap(manifest_url: str, signature_url: str, public_key_url: str,
 
 
 def configure_product(manifest_url: str, signature_url: str, public_key_url: str, cache: Path, ops_root: Path,
-                      profile: Path, *, non_interactive: bool, choices: Path | None, probe_download: bool) -> Path:
+                      profile: Path, *, non_interactive: bool, choices: Path | None, probe_download: bool,
+                      space_root: Path | None = None) -> Path:
     if choices is not None and not non_interactive:
         raise BootstrapError("choices file requires non-interactive configuration")
     # Keep this run's signature and catalog together even when another selection runs concurrently.
@@ -247,6 +248,8 @@ def configure_product(manifest_url: str, signature_url: str, public_key_url: str
             command += ["--choices-json", str(choices)]
         if probe_download:
             command.append("--probe-download")
+        if space_root is not None:
+            command += ["--space-root", str(space_root)]
         subprocess.run(command, check=True)
     return target
 
@@ -329,6 +332,7 @@ def main() -> int:
     parser.add_argument("--non-interactive", action="store_true")
     parser.add_argument("--choices-json", type=Path)
     parser.add_argument("--probe-download", action="store_true")
+    parser.add_argument("--space-root", type=Path)
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--install-root", type=Path)
     parser.add_argument("--state-root", type=Path)
@@ -339,13 +343,14 @@ def main() -> int:
         try:
             target = configure_product(args.manifest_url, args.signature_url, args.public_key_url, args.cache,
                                        args.ops_root, args.profile, non_interactive=args.non_interactive,
-                                       choices=args.choices_json, probe_download=args.probe_download)
+                                       choices=args.choices_json, probe_download=args.probe_download,
+                                       space_root=args.space_root)
         except (BootstrapError, OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
             print(f"Bunker AI bootstrap: {error}", file=sys.stderr)
             return 1
         print(json.dumps({"ok": True, "ops_source": str(target), "step": "configure"}))
         return 0
-    if args.profile or args.non_interactive or args.choices_json or args.probe_download:
+    if args.profile or args.non_interactive or args.choices_json or args.probe_download or args.space_root:
         parser.error("selection options require --configure")
     if args.source_root is None or args.install_root is None:
         parser.error("product operation requires --source-root and --install-root")

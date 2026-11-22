@@ -4,7 +4,7 @@ set -eu
 
 usage() {
     printf '%s\n' 'Usage: sudo sh install.sh --prepare|--install-platform|--initialize-n8n|--activate-modules' \
-        '       sudo sh install.sh --configure [--non-interactive [--choices-json FILE]] [--probe-download]' \
+        '       sudo sh install.sh --configure [--non-interactive [--choices-json FILE]] [--space-root DIR] [--probe-download]' \
         'Use the complete release bundle; piping this script alone to sh is unsupported.'
 }
 
@@ -19,7 +19,7 @@ fi
 action=$1
 shift
 version=1.0.0
-non_interactive='' choices='' probe_download=''
+non_interactive='' choices='' probe_download='' space_root=''
 case "$action" in
     --configure)
         version=1.1.0
@@ -30,6 +30,11 @@ case "$action" in
                 --choices-json)
                     if [ "$#" -lt 2 ] || [ -z "$2" ]; then usage >&2; exit 2; fi
                     choices=$2
+                    shift
+                    ;;
+                --space-root)
+                    if [ "$#" -lt 2 ] || [ -z "$2" ]; then usage >&2; exit 2; fi
+                    space_root=$2
                     shift
                     ;;
                 *) usage >&2; exit 2 ;;
@@ -60,7 +65,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='a044b002362dc2f892f8ad092c96e4207469974f9b1f134e09916f8bf476627a'
+bootstrap_sha256='1076688679d0e6317b963a64a78ab125268b6d61b86d84e9d972a7bcc8cc3665'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
@@ -100,6 +105,7 @@ if [ "$action" = '--configure' ]; then
     if [ -n "$non_interactive" ]; then set -- "$@" "$non_interactive"; fi
     if [ -n "$choices" ]; then set -- "$@" "--choices-json=$choices"; fi
     if [ -n "$probe_download" ]; then set -- "$@" "$probe_download"; fi
+    if [ -n "$space_root" ]; then set -- "$@" "--space-root=$space_root"; fi
     ops_root="$root/opt/bunker/selection-releases"
 else
     set -- --source-root "$root/opt/bunker/module-sources" \
