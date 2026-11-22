@@ -4,7 +4,7 @@ set -eu
 
 usage() {
     printf '%s\n' 'Usage: sudo sh install.sh --prepare|--install-platform|--initialize-n8n|--activate-modules' \
-        '       sudo sh install.sh --configure [--non-interactive [--choices-json FILE]] [--space-root DIR] [--probe-download]' \
+        '       sudo sh install.sh --configure [--non-interactive [--choices-json FILE]] [--space-root DIR] [--min-free-after-bytes BYTES] [--probe-download]' \
         'Use the complete release bundle; piping this script alone to sh is unsupported.'
 }
 
@@ -19,7 +19,7 @@ fi
 action=$1
 shift
 version=1.0.0
-non_interactive='' choices='' probe_download='' space_root=''
+non_interactive='' choices='' probe_download='' space_root='' min_free_after_bytes=''
 case "$action" in
     --configure)
         version=1.1.0
@@ -35,6 +35,12 @@ case "$action" in
                 --space-root)
                     if [ "$#" -lt 2 ] || [ -z "$2" ]; then usage >&2; exit 2; fi
                     space_root=$2
+                    shift
+                    ;;
+                --min-free-after-bytes)
+                    if [ "$#" -lt 2 ]; then usage >&2; exit 2; fi
+                    case "$2" in ''|*[!0-9]*) usage >&2; exit 2 ;; esac
+                    min_free_after_bytes=$2
                     shift
                     ;;
                 *) usage >&2; exit 2 ;;
@@ -65,7 +71,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='1076688679d0e6317b963a64a78ab125268b6d61b86d84e9d972a7bcc8cc3665'
+bootstrap_sha256='c9fb3fe1ff21a0e180fe9fa0996047e415209a22fb81835525443c946ae3b2de'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
@@ -106,6 +112,7 @@ if [ "$action" = '--configure' ]; then
     if [ -n "$choices" ]; then set -- "$@" "--choices-json=$choices"; fi
     if [ -n "$probe_download" ]; then set -- "$@" "$probe_download"; fi
     if [ -n "$space_root" ]; then set -- "$@" "--space-root=$space_root"; fi
+    if [ -n "$min_free_after_bytes" ]; then set -- "$@" "--min-free-after-bytes=$min_free_after_bytes"; fi
     ops_root="$root/opt/bunker/selection-releases"
 else
     set -- --source-root "$root/opt/bunker/module-sources" \

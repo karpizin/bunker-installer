@@ -115,9 +115,11 @@ from pathlib import Path
 cli = argparse.ArgumentParser()
 for name in ("manifest", "signature", "public-key", "profile", "choices-json", "space-root"):
     cli.add_argument("--" + name, type=Path)
+cli.add_argument("--min-free-after-bytes", type=int)
 cli.add_argument("--non-interactive", action="store_true")
 args = cli.parse_args()
 assert args.non_interactive and args.signature.is_file() and args.public_key.is_file() and args.space_root.name == "target volume"
+assert args.min_free_after_bytes == 80 * (1 << 30)
 assert json.loads(args.manifest.read_bytes())["platform_release"]["version"] == "1.1.0"
 args.profile.write_text(args.choices_json.read_text())
 """
@@ -141,7 +143,7 @@ args.profile.write_text(args.choices_json.read_text())
                 patch.object(bootstrap, "curl", side_effect=self.download):
             target = bootstrap.configure_product(*self.arguments, profile, non_interactive=True,
                                                  choices=choices, probe_download=False,
-                                                 space_root=self.root / "target volume")
+                                                 space_root=self.root / "target volume", min_free_after_bytes=80 << 30)
             self.assertTrue((target / "scripts/install/product-setup.py").is_file())
             self.assertEqual(profile.read_text(), choices.read_text())
             self.assertFalse((self.root / "cache/trust").exists())
