@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ class InstallEntryTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         shutil.copy2(ROOT / "install.sh", self.root / "install.sh")
         shutil.copy2(ROOT / "product-bootstrap.py", self.root / "product-bootstrap.py")
+        self.bootstrap_hash = hashlib.sha256((ROOT / "product-bootstrap.py").read_bytes()).hexdigest()
         self.tools = self.root / "tools"
         self.tools.mkdir()
         (self.tools / "id").write_text("#!/bin/sh\necho 0\n")
@@ -63,9 +65,7 @@ class InstallEntryTests(unittest.TestCase):
         result = self.run_install("--prepare")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root / "product-bootstrap.py").read_text(), "tampered\n")
-        self.assertTrue(self.copy_hash_log.read_text().startswith(
-            "dfd1b974a809cd2489af417c5056379e9e3c19d0d764eafb9d856b69c59e5267 "
-        ))
+        self.assertTrue(self.copy_hash_log.read_text().startswith(self.bootstrap_hash + " "))
         self.assertFalse(Path(self.log.read_text().splitlines()[0]).exists())
 
     def test_missing_or_changed_bootstrap_never_executes(self):
@@ -102,6 +102,77 @@ class InstallEntryTests(unittest.TestCase):
                 result = self.run_install("--prepare")
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("Invalid BUNKER_RELEASE_TAG", result.stderr)
+                self.assertFalse(self.log.exists())
+
+    def test_configure_uses_isolated_11_catalog_and_passes_choices_as_data(self):
+        self.env.update(BUNKER_RELEASE_TAG="v1.1.0-rc1", BUNKER_ACCEPTANCE_ID="release-11")
+        result = self.run_install("--configure", "--non-interactive", "--choices-json", "/tmp/with spaces.json",
+                                  "--space-root", "/mnt/target volume", "--min-free-after-bytes", "85899345920")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        self.assertIn("https://github.com/karpizin/bunker-installer/releases/download/"
+                      "v1.1.0-rc1/release-1.1.0.json", arguments)
+        self.assertIn("/var/lib/bunker-acceptance/release-11/opt/bunker/selection-releases", arguments)
+        self.assertIn("/var/lib/bunker-acceptance/release-11/var/lib/bunker-installer/1.1.0/selection.json", arguments)
+        self.assertIn("--choices-json=/tmp/with spaces.json", arguments)
+        self.assertIn("--space-root=/mnt/target volume", arguments)
+        self.assertIn("--min-free-after-bytes=85899345920", arguments)
+        self.assertIn("--non-interactive", arguments)
+        self.assertNotIn("--install-root", arguments)
+        self.assertNotIn("--activate-modules", arguments)
+
+    def test_configure_does_not_cross_release_or_allow_bootstrap_overrides(self):
+        for tag, args in (
+            ("v1.0.0", ("--configure",)),
+            ("v1.1.0", ("--install-platform",)),
+            ("v1.1.0", ("--configure", "--manifest-url", "https://example.invalid")),
+            ("v1.1.0", ("--configure", "--choices-json", "/tmp/options")),
+            ("v1.1.0", ("--configure", "--min-free-after-bytes", "-1")),
+            ("v1.0.0", ("--prepare", "--min-free-after-bytes", "0")),
+            ("v1.1.0", ("--configure", "--space-root", "/target", "--disk-layout-json", "/plan")),
+        ):
+            with self.subTest(tag=tag, args=args):
+                self.env["BUNKER_RELEASE_TAG"] = tag
+                result = self.run_install(*args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertFalse(self.log.exists())
+
+    def test_configure_forwards_disk_layout_path_as_data(self):
+        result = self.run_install("--configure", "--disk-layout-json", "/tmp/disk plan.json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--disk-layout-json=/tmp/disk plan.json", self.log.read_text().splitlines())
+
+    def test_geo_uses_local_11_cache_and_preserves_argument_boundaries(self):
+        self.env.update(BUNKER_ACCEPTANCE_ID="release-110-geo")
+        result = self.run_install("--geo", "recover", "/tmp/release trust", "--", "--profile", "/tmp/my profile")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        opts = self.log.read_text().splitlines()[1:]
+        root = "/var/lib/bunker-acceptance/release-110-geo"
+        self.assertEqual(opts, ["--geo", "recover", "--trust-dir", "/tmp/release trust",
+                                "--ops-cache", root + "/var/cache/bunker-ai/1.1.0",
+                                "--ops-root", root + "/opt/bunker/selection-releases",
+                                "--", "--profile", "/tmp/my profile"])
+
+    def test_geo_refuses_invalid_action_or_legacy_acceptance_root(self):
+        self.assertEqual(self.run_install("--geo", "down", "/trust", "--").returncode, 2)
+        self.assertEqual(self.run_install("--geo", "restart", "/trust").returncode, 2)
+        self.env["BUNKER_ACCEPTANCE_ID"] = "release-100-rc22"
+        result = self.run_install("--geo", "activate", "/trust", "--")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("separate 1.1 project", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_locale_is_only_forwarded_to_configure_and_uses_canonical_ids(self):
+        for locale in ("en", "ru", "zh-Hans"):
+            with self.subTest(locale=locale):
+                result = self.run_install("--configure", "--locale", locale)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"--locale={locale}", self.log.read_text().splitlines())
+        self.log.unlink()
+        for args in (("--configure", "--locale"), ("--configure", "--locale", "zh-Hant"),
+                     ("--configure", "--locale", "../../ru"), ("--prepare", "--locale", "ru")):
+            with self.subTest(args=args):
+                self.assertEqual(self.run_install(*args).returncode, 2)
                 self.assertFalse(self.log.exists())
 
     def test_acceptance_id_routes_all_paths_to_isolated_tree(self):

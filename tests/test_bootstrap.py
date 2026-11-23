@@ -22,7 +22,7 @@ class BootstrapTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.published = self.root / "published"
         self.published.mkdir()
         self.archive = self.published / "ops.tar.gz"
@@ -76,6 +76,103 @@ class BootstrapTests(unittest.TestCase):
     def download(self, url, destination, *, resume):
         shutil.copyfile(self.urls[url], destination)
 
+    def local_geo_fixture(self):
+        script = b"""import json, sys
+from pathlib import Path
+action = sys.argv[1]
+opts = dict(zip(sys.argv[2::2], sys.argv[3::2]))
+assert Path(opts["--signature"]).is_file()
+assert Path(opts["--public-key"]).is_file()
+manifest = json.loads(Path(opts["--manifest"]).read_bytes())
+assert manifest["platform_release"]["version"] == "1.1.0"
+Path(opts["--profile"]).write_text(action)
+"""
+        with tarfile.open(self.archive, "w:gz") as package:
+            for name, payload in (("VERSION", b"0.2.25\n"), ("scripts/install/product-geo-service.py", script)):
+                entry = tarfile.TarInfo("bunker-ops-0.2.25/" + name)
+                entry.size = len(payload)
+                package.addfile(entry, io.BytesIO(payload))
+        document = json.loads(self.manifest.read_bytes())
+        document.update(schema_version="bunker.appliance-release/v2", platform_release={"version": "1.1.0"},
+                        installation_catalog={"schema_version": "bunker.install-catalog/v2"},
+                        target_host={"disk_policy": "platform_plus_selected_catalog", "platform_disk_budget": {}})
+        item = document["distribution"]["ops_source"]
+        item.update(size_bytes=self.archive.stat().st_size, sha256=bootstrap.sha256(self.archive))
+        trust = self.root / "local trust"
+        trust.mkdir()
+        manifest = trust / "release-1.1.0.json"
+        manifest.write_text(json.dumps(document))
+        signature = trust / "release-1.1.0.sig"
+        subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(self.private),
+                        "-out", str(signature), str(manifest)], check=True, capture_output=True)
+        shutil.copyfile(self.public, trust / "bunker-product-release-2026.pem")
+        archive = self.arguments[3] / item["path"]
+        archive.parent.mkdir(parents=True)
+        shutil.copyfile(self.archive, archive)
+        return trust, archive
+
+    def test_managed_geo_dispatches_each_step_offline_from_signed_source(self):
+        trust, _archive = self.local_geo_fixture()
+        profile = self.root / "selected profile.json"
+        cache, releases = self.arguments[3:]
+        with patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \
+                patch.object(bootstrap, "curl", side_effect=AssertionError("used network")) as network:
+            for action in ("activate", "recover", "restart"):
+                with self.subTest(action=action):
+                    self.assertEqual(bootstrap.geo_entry([
+                        action, "--trust-dir", str(trust), "--ops-cache", str(cache), "--ops-root", str(releases),
+                        "--", "--profile", str(profile),
+                    ]), 0)
+                    self.assertEqual(profile.read_text(), action)
+            network.assert_not_called()
+        self.assertFalse((releases / "bunker-ops-0.2.25/scripts/install/__pycache__").exists())
+
+    def test_managed_geo_rejects_trust_overrides_even_before_verification(self):
+        for option in ("--manifest", "--signature=/other.sig", "--public-k", "--"):
+            with self.subTest(option=option):
+                with self.assertRaisesRegex(bootstrap.BootstrapError, "only from the local trust"):
+                    bootstrap.run_local_geo("recover", self.published, *self.arguments[3:], [option])
+
+    def test_managed_geo_refuses_missing_or_tampered_ops_archive_without_network(self):
+        trust, archive = self.local_geo_fixture()
+        with patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \
+                patch.object(bootstrap, "curl", side_effect=AssertionError("used network")):
+            archive.write_bytes(b"tampered")
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "archive checksum mismatch"):
+                bootstrap.run_local_geo("recover", trust, *self.arguments[3:], [])
+            archive.unlink()
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "must already be in the local cache"):
+                bootstrap.run_local_geo("recover", trust, *self.arguments[3:], [])
+        self.assertFalse(self.arguments[4].exists())
+
+    def test_managed_geo_refuses_linked_trust_and_changed_staged_ops(self):
+        trust, _archive = self.local_geo_fixture()
+        aliased_trust = self.root / "alias"
+        aliased_trust.symlink_to(trust, target_is_directory=True)
+        with patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint):
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "canonical absolute"):
+                bootstrap.run_local_geo("recover", aliased_trust, *self.arguments[3:], [])
+            profile = self.root / "marker"
+            opts = ["--profile", str(profile)]
+            bootstrap.run_local_geo("recover", trust, *self.arguments[3:], opts)
+            profile.unlink()
+            (self.arguments[4] / "bunker-ops-0.2.25/scripts/install/product-geo-service.py").write_text("# changed\n")
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "installed Ops source differs"):
+                bootstrap.run_local_geo("recover", trust, *self.arguments[3:], opts)
+            self.assertFalse(profile.exists())
+
+    def test_managed_geo_rejects_tampered_or_wrong_version_manifest(self):
+        trust, _archive = self.local_geo_fixture()
+        with patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint):
+            manifest = trust / "release-1.1.0.json"
+            shutil.copyfile(self.manifest, manifest)
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "signature verification failed"):
+                bootstrap.run_local_geo("activate", trust, *self.arguments[3:], [])
+            shutil.copyfile(self.signature, trust / "release-1.1.0.sig")
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "not a production Bunker AI 1.1.0"):
+                bootstrap.run_local_geo("activate", trust, *self.arguments[3:], [])
+        self.assertFalse(self.arguments[4].exists())
+
     def test_acceptance_paths_allow_service_traversal_without_listing(self):
         base = self.root / "acceptance"
         base.mkdir(mode=0o700)
@@ -108,6 +205,65 @@ class BootstrapTests(unittest.TestCase):
             (target / "VERSION").write_text("modified\n")
             with self.assertRaisesRegex(bootstrap.BootstrapError, "installed Ops source differs"):
                 bootstrap.bootstrap(*self.arguments)
+
+    def test_configure_uses_signed_11_manifest_and_stages_only_chooser(self):
+        script = b"""import argparse, json
+from pathlib import Path
+cli = argparse.ArgumentParser()
+for name in ("manifest", "signature", "public-key", "profile", "choices-json", "space-root"):
+    cli.add_argument("--" + name, type=Path)
+cli.add_argument("--min-free-after-bytes", type=int)
+cli.add_argument("--non-interactive", action="store_true")
+args = cli.parse_args()
+assert args.non_interactive and args.signature.is_file() and args.public_key.is_file() and args.space_root.name == "target volume"
+assert args.min_free_after_bytes == 80 * (1 << 30)
+assert json.loads(args.manifest.read_bytes())["platform_release"]["version"] == "1.1.0"
+args.profile.write_text(args.choices_json.read_text())
+"""
+        with tarfile.open(self.archive, "w:gz") as package:
+            for name, payload in (("VERSION", b"0.2.25\n"), ("scripts/install/product-setup.py", script)):
+                entry = tarfile.TarInfo("bunker-ops-0.2.25/" + name)
+                entry.size = len(payload)
+                package.addfile(entry, io.BytesIO(payload))
+        document = json.loads(self.manifest.read_bytes())
+        document.update(schema_version="bunker.appliance-release/v2", platform_release={"version": "1.1.0"},
+                        installation_catalog={"schema_version": "bunker.install-catalog/v2"},
+                        target_host={"disk_policy": "platform_plus_selected_catalog", "platform_disk_budget": {
+                            "asset_bytes": 120, "image_download_bytes": 400, "install_overhead_bytes": 50,
+                            "required_bytes": 570}})
+        document["distribution"]["ops_source"].update(size_bytes=self.archive.stat().st_size,
+                                                      sha256=bootstrap.sha256(self.archive))
+        self.manifest.write_text(json.dumps(document))
+        subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(self.private),
+                        "-out", str(self.signature), str(self.manifest)], check=True, capture_output=True)
+        choices = self.root / "selected models.json"
+        choices.write_text('{"models":["alpha","beta"]}')
+        profile = self.root / "profile.json"
+        with patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \
+                patch.object(bootstrap, "curl", side_effect=self.download):
+            target = bootstrap.configure_product(*self.arguments, profile, non_interactive=True,
+                                                 choices=choices, probe_download=False,
+                                                 space_root=self.root / "target volume", min_free_after_bytes=80 << 30)
+            self.assertTrue((target / "scripts/install/product-setup.py").is_file())
+            self.assertEqual(profile.read_text(), choices.read_text())
+            self.assertFalse((self.root / "cache/trust").exists())
+            self.assertFalse((target / "scripts/install/__pycache__").exists())
+            profile.unlink()
+            self.manifest.write_text("{}")
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "signature verification failed"):
+                bootstrap.configure_product(*self.arguments, profile, non_interactive=True,
+                                            choices=choices, probe_download=False)
+            self.assertFalse(profile.exists())
+
+    def test_configure_refuses_even_a_validly_signed_10_release(self):
+        profile = self.root / "profile.json"
+        with patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \
+                patch.object(bootstrap, "curl", side_effect=self.download) as fetch:
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "not a production Bunker AI 1.1.0"):
+                bootstrap.configure_product(*self.arguments, profile, non_interactive=False,
+                                            choices=None, probe_download=False)
+            self.assertEqual(fetch.call_count, 3)
+            self.assertFalse(profile.exists())
 
     def test_bad_key_or_signature_stops_before_ops_download(self):
         fetched = []

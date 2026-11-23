@@ -20,6 +20,8 @@ from urllib.parse import urlsplit
 
 PRODUCT_KEY_FINGERPRINT = "1e7ad26b66b4f5eab9e60f9ae630b3f57f59fd19fe8c33dfadf3282b4127ae5b"
 MAX_OPS_BYTES = 1024 * 1024 * 1024
+RELEASE_SCHEMAS = {"1.0.0": "bunker.appliance-release/v1", "1.1.0": "bunker.appliance-release/v2"}
+CONFIGURE_CANCELLED = 3
 
 
 class BootstrapError(RuntimeError):
@@ -81,17 +83,26 @@ def verify_signature(manifest: Path, signature: Path, public_key: Path) -> None:
         raise BootstrapError("product manifest signature verification failed") from error
 
 
-def ops_pin(manifest: Path) -> dict[str, object]:
+def ops_pin(manifest: Path, release_version: str = "1.0.0") -> dict[str, object]:
     value = json.loads(manifest.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise BootstrapError("signed file is not a product manifest")
     platform_release = value.get("platform_release")
     distribution = value.get("distribution")
-    if (value.get("schema_version") != "bunker.appliance-release/v1"
+    if (release_version not in RELEASE_SCHEMAS
+            or value.get("schema_version") != RELEASE_SCHEMAS[release_version]
             or value.get("status") != "production"
             or not isinstance(platform_release, dict)
-            or platform_release.get("version") != "1.0.0"):
-        raise BootstrapError("signed file is not a production Bunker AI 1.0.0 manifest")
+            or platform_release.get("version") != release_version):
+        raise BootstrapError(f"signed file is not a production Bunker AI {release_version} manifest")
+    if release_version == "1.1.0":
+        catalog = value.get("installation_catalog")
+        if not isinstance(catalog, dict) or catalog.get("schema_version") != "bunker.install-catalog/v2":
+            raise BootstrapError("signed 1.1.0 manifest lacks a world-bundle installation catalog")
+        host = value.get("target_host")
+        if (not isinstance(host, dict) or host.get("disk_policy") != "platform_plus_selected_catalog"
+                or not isinstance(host.get("platform_disk_budget"), dict)):
+            raise BootstrapError("signed 1.1.0 manifest lacks the platform disk budget")
     item = distribution.get("ops_source") if isinstance(distribution, dict) else None
     if not isinstance(item, dict):
         raise BootstrapError("signed manifest lacks the Ops source")
@@ -200,22 +211,68 @@ def stage_ops(archive: Path, item: dict[str, object], ops_root: Path) -> Path:
 
 
 def bootstrap(manifest_url: str, signature_url: str, public_key_url: str,
-              cache: Path, ops_root: Path) -> Path:
+              cache: Path, ops_root: Path, *, release_version: str = "1.0.0", private_trust: Path | None = None) -> Path:
+    if release_version not in RELEASE_SCHEMAS:
+        raise BootstrapError("unsupported bootstrap release")
     cache.mkdir(parents=True, exist_ok=True)
     if cache.is_symlink():
         raise BootstrapError("bootstrap cache must not be a symbolic link")
-    trust = cache / "trust"
+    trust = private_trust if private_trust is not None else cache / "trust"
     trust.mkdir(exist_ok=True)
     if trust.is_symlink():
         raise BootstrapError("bootstrap trust cache must not be a symbolic link")
-    manifest, signature, key = (trust / "release-1.0.0.json", trust / "release-1.0.0.sig",
+    manifest, signature, key = (trust / f"release-{release_version}.json", trust / f"release-{release_version}.sig",
                                 trust / "bunker-product-release-2026.pem")
     fetch_trust_file(manifest_url, manifest)
     fetch_trust_file(signature_url, signature)
     fetch_trust_file(public_key_url, key)
     verify_signature(manifest, signature, key)
-    item = ops_pin(manifest)
+    item = ops_pin(manifest, release_version)
     return stage_ops(fetch_ops(item, cache), item, ops_root)
+
+
+def configure_product(manifest_url: str, signature_url: str, public_key_url: str, cache: Path, ops_root: Path,
+                      profile: Path, *, non_interactive: bool, choices: Path | None, probe_download: bool,
+                      space_root: Path | None = None, min_free_after_bytes: int = 0,
+                      disk_layout: Path | None = None, locale: str | None = None) -> Path | None:
+    if choices is not None and not non_interactive:
+        raise BootstrapError("choices file requires non-interactive configuration")
+    if type(min_free_after_bytes) is not int or min_free_after_bytes < 0:
+        raise BootstrapError("post-install free-space floor must be a nonnegative integer")
+    if space_root is not None and disk_layout is not None:
+        raise BootstrapError("space root and disk layout cannot be combined")
+    if locale is not None and locale not in ("en", "ru", "zh-Hans"):
+        raise BootstrapError("unsupported installer locale")
+    # Keep this run's signature and catalog together even when another selection runs concurrently.
+    with tempfile.TemporaryDirectory(prefix="bunker-selection-trust-") as directory:
+        trust = Path(directory)
+        target = bootstrap(manifest_url, signature_url, public_key_url, cache, ops_root,
+                           release_version="1.1.0", private_trust=trust)
+        script = target / "scripts/install/product-setup.py"
+        if not script.is_file() or script.is_symlink():
+            raise BootstrapError("verified Ops source lacks the 1.1 selection tool")
+        command = [sys.executable, "-B", str(script), "--manifest", str(trust / "release-1.1.0.json"),
+                   "--signature", str(trust / "release-1.1.0.sig"), "--public-key",
+                   str(trust / "bunker-product-release-2026.pem"), "--profile", str(profile)]
+        if non_interactive:
+            command.append("--non-interactive")
+        if locale is not None:
+            command += ["--locale", locale]
+        if choices is not None:
+            command += ["--choices-json", str(choices)]
+        if probe_download:
+            command.append("--probe-download")
+        if space_root is not None:
+            command += ["--space-root", str(space_root)]
+        if disk_layout is not None:
+            command += ["--disk-layout-json", str(disk_layout)]
+        if min_free_after_bytes:
+            command += ["--min-free-after-bytes", str(min_free_after_bytes)]
+        result = subprocess.run(command, check=False)
+        if result.returncode == CONFIGURE_CANCELLED and not non_interactive:
+            return None
+        result.check_returncode()
+    return target
 
 
 def prepare_product(target: Path, cache: Path, ops_root: Path,
@@ -278,7 +335,61 @@ def prepare_acceptance_service_paths(root: Path) -> None:
         path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IXOTH)
 
 
+def run_local_geo(action: str, trust: Path, cache: Path, ops_root: Path, options: list[str]) -> None:
+    if action not in {"activate", "recover", "restart"}:
+        raise BootstrapError("unsupported managed Geo action")
+    pinned_options = ("--manifest", "--signature", "--public-key")
+    if any(option == "--" or (option.startswith("--") and any(
+            flag.startswith(option.split("=", 1)[0]) for flag in pinned_options)) for option in options):
+        raise BootstrapError("Geo manifest, signature and key come only from the local trust directory")
+    if any(not path.is_absolute() or path == Path("/") or path.resolve() != path
+           for path in (trust, cache, ops_root)):
+        raise BootstrapError("Geo trust, cache and Ops roots must be canonical absolute directories")
+    names = ("release-1.1.0.json", "release-1.1.0.sig", "bunker-product-release-2026.pem")
+    with tempfile.TemporaryDirectory(prefix="bunker-geo-trust-") as directory:
+        snapshot = Path(directory)
+        for name in names:
+            source = trust / name
+            if source.is_symlink() or not source.is_file():
+                raise BootstrapError("local signed 1.1 Geo release files are required")
+            shutil.copyfile(source, snapshot / name)
+        manifest, signature, key = (snapshot / name for name in names)
+        verify_signature(manifest, signature, key)
+        item = ops_pin(manifest, "1.1.0")
+        archive = cache / str(item["path"])
+        if archive.resolve() != archive or not archive.is_file():
+            raise BootstrapError("the pinned Ops archive must already be in the local cache")
+        target = stage_ops(archive, item, ops_root)
+        script = target / "scripts/install/product-geo-service.py"
+        if not script.is_file() or script.is_symlink():
+            raise BootstrapError("verified Ops source lacks the managed Geo command")
+        subprocess.run([
+            sys.executable, "-B", str(script), action,
+            "--manifest", str(manifest), "--signature", str(signature), "--public-key", str(key), *options,
+        ], check=True)
+
+
+def geo_entry(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="product-bootstrap.py --geo", allow_abbrev=False)
+    parser.add_argument("action", choices=("activate", "recover", "restart"))
+    parser.add_argument("--trust-dir", type=Path, required=True)
+    parser.add_argument("--ops-cache", type=Path, required=True)
+    parser.add_argument("--ops-root", type=Path, required=True)
+    if "--" not in argv:
+        parser.error("separate the managed Geo options with --")
+    split = argv.index("--")
+    args = parser.parse_args(argv[:split])
+    try:
+        run_local_geo(args.action, args.trust_dir, args.ops_cache, args.ops_root, argv[split + 1:])
+    except (BootstrapError, OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
+        print(f"Bunker AI Geo bootstrap: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> int:
+    if sys.argv[1:2] == ["--geo"]:
+        return geo_entry(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest-url", required=True)
     parser.add_argument("--signature-url", required=True)
@@ -291,10 +402,41 @@ def main() -> int:
     action.add_argument("--install-platform", action="store_true")
     action.add_argument("--initialize-n8n", action="store_true")
     action.add_argument("--activate-modules", action="store_true")
+    action.add_argument("--configure", action="store_true", help="save the choices from the signed 1.1 catalog; do not install")
+    parser.add_argument("--profile", type=Path)
+    parser.add_argument("--non-interactive", action="store_true")
+    parser.add_argument("--locale", choices=("en", "ru", "zh-Hans"),
+                        help="setup language only (default: en)")
+    parser.add_argument("--choices-json", type=Path)
+    parser.add_argument("--probe-download", action="store_true")
+    parser.add_argument("--space-root", type=Path)
+    parser.add_argument("--disk-layout-json", type=Path)
+    parser.add_argument("--min-free-after-bytes", type=int)
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--install-root", type=Path)
     parser.add_argument("--state-root", type=Path)
     args = parser.parse_args()
+    if args.configure:
+        if args.profile is None or (args.choices_json is not None and not args.non_interactive):
+            parser.error("--configure requires --profile; --choices-json requires --non-interactive")
+        try:
+            target = configure_product(args.manifest_url, args.signature_url, args.public_key_url, args.cache,
+                                       args.ops_root, args.profile, non_interactive=args.non_interactive,
+                                       choices=args.choices_json, probe_download=args.probe_download,
+                                       space_root=args.space_root,
+                                       disk_layout=args.disk_layout_json, locale=args.locale,
+                                       min_free_after_bytes=0 if args.min_free_after_bytes is None else args.min_free_after_bytes)
+        except (BootstrapError, OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
+            print(f"Bunker AI bootstrap: {error}", file=sys.stderr)
+            return 1
+        result = {"ok": True, "step": "configure", "saved": target is not None}
+        if target is not None:
+            result["ops_source"] = str(target)
+        print(json.dumps(result))
+        return 0
+    if (args.profile or args.non_interactive or args.choices_json or args.probe_download or args.space_root or args.locale
+            or args.min_free_after_bytes is not None or args.disk_layout_json is not None):
+        parser.error("selection options require --configure")
     if args.source_root is None or args.install_root is None:
         parser.error("product operation requires --source-root and --install-root")
     if not args.prepare and args.state_root is None:

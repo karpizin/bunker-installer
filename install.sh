@@ -4,6 +4,8 @@ set -eu
 
 usage() {
     printf '%s\n' 'Usage: sudo sh install.sh --prepare|--install-platform|--initialize-n8n|--activate-modules' \
+        '       sudo sh install.sh --configure [--locale en|ru|zh-Hans] [--non-interactive [--choices-json FILE]] [--space-root DIR | --disk-layout-json FILE] [--min-free-after-bytes BYTES] [--probe-download]' \
+        '       sudo sh install.sh --geo activate|recover|restart TRUST_DIR -- [managed Geo options]' \
         'Use the complete release bundle; piping this script alone to sh is unsupported.'
 }
 
@@ -11,12 +13,63 @@ if [ "${1:-}" = '--help' ]; then
     usage
     exit 0
 fi
-if [ "$#" -ne 1 ]; then
+if [ "$#" -eq 0 ]; then
     usage >&2
     exit 2
 fi
-case "$1" in
-    --prepare|--install-platform|--initialize-n8n|--activate-modules) ;;
+action=$1
+shift
+version=1.0.0
+non_interactive='' choices='' probe_download='' space_root='' min_free_after_bytes='' disk_layout='' locale=''
+case "$action" in
+    --geo)
+        if [ "$#" -lt 3 ] || [ -z "$2" ] || [ "$3" != '--' ]; then usage >&2; exit 2; fi
+        case "$1" in activate|recover|restart) geo_action=$1 ;; *) usage >&2; exit 2 ;; esac
+        geo_trust=$2
+        shift 3
+        version=1.1.0
+        ;;
+    --configure)
+        version=1.1.0
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --non-interactive) non_interactive=--non-interactive ;;
+                --probe-download) probe_download=--probe-download ;;
+                --locale)
+                    case "${2:-}" in en|ru|zh-Hans) locale=$2 ;; *) usage >&2; exit 2 ;; esac
+                    shift
+                    ;;
+                --choices-json)
+                    if [ "$#" -lt 2 ] || [ -z "$2" ]; then usage >&2; exit 2; fi
+                    choices=$2
+                    shift
+                    ;;
+                --space-root)
+                    if [ "$#" -lt 2 ] || [ -z "$2" ]; then usage >&2; exit 2; fi
+                    space_root=$2
+                    shift
+                    ;;
+                --disk-layout-json)
+                    if [ "$#" -lt 2 ] || [ -z "$2" ]; then usage >&2; exit 2; fi
+                    disk_layout=$2
+                    shift
+                    ;;
+                --min-free-after-bytes)
+                    if [ "$#" -lt 2 ]; then usage >&2; exit 2; fi
+                    case "$2" in ''|*[!0-9]*) usage >&2; exit 2 ;; esac
+                    min_free_after_bytes=$2
+                    shift
+                    ;;
+                *) usage >&2; exit 2 ;;
+            esac
+            shift
+        done
+        if [ -n "$choices" ] && [ -z "$non_interactive" ]; then usage >&2; exit 2; fi
+        if [ -n "$space_root" ] && [ -n "$disk_layout" ]; then usage >&2; exit 2; fi
+        ;;
+    --prepare|--install-platform|--initialize-n8n|--activate-modules)
+        if [ "$#" -ne 0 ]; then usage >&2; exit 2; fi
+        ;;
     *) usage >&2; exit 2 ;;
 esac
 if [ "$(id -u)" -ne 0 ]; then
@@ -36,7 +89,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='dfd1b974a809cd2489af417c5056379e9e3c19d0d764eafb9d856b69c59e5267'
+bootstrap_sha256='961134a841d7ab8632abe297ee466afcc06459df94ef3acdc0018651759b9670'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
@@ -49,10 +102,14 @@ if ! printf '%s  %s\n' "$bootstrap_sha256" "$trusted_bootstrap" | sha256sum --ch
     exit 1
 fi
 
-release_tag=${BUNKER_RELEASE_TAG:-v1.0.0}
-if [ "$release_tag" != 'v1.0.0' ] &&
-   ! printf '%s\n' "$release_tag" | grep -Eq '^v1\.0\.0-rc[1-9][0-9]*$'; then
-    printf '%s\n' 'Invalid BUNKER_RELEASE_TAG; use v1.0.0 or a 1.0.0 prerelease tag.' >&2
+release_tag=${BUNKER_RELEASE_TAG:-v$version}
+case "$version" in
+    1.0.0) prerelease='^v1\.0\.0-rc[1-9][0-9]*$' ;;
+    1.1.0) prerelease='^v1\.1\.0-rc[1-9][0-9]*$' ;;
+esac
+if [ "$release_tag" != "v$version" ] &&
+   ! printf '%s\n' "$release_tag" | grep -Eq "$prerelease"; then
+    printf '%s\n' "Invalid BUNKER_RELEASE_TAG; expected v$version or its prerelease tag." >&2
     exit 2
 fi
 release="https://github.com/karpizin/bunker-installer/releases/download/$release_tag"
@@ -67,13 +124,32 @@ if [ -n "$acceptance_id" ]; then
     fi
     root="/var/lib/bunker-acceptance/$acceptance_id"
 fi
+if [ "$action" = '--geo' ]; then
+    case "$acceptance_id" in
+        release-100-*) printf '%s\n' 'Managed Geo requires a separate 1.1 project, not a 1.0 acceptance root.' >&2; exit 2 ;;
+    esac
+    python3 "$trusted_bootstrap" --geo "$geo_action" --trust-dir "$geo_trust" \
+        --ops-cache "$root/var/cache/bunker-ai/$version" \
+        --ops-root "$root/opt/bunker/selection-releases" -- "$@"
+    exit
+fi
+if [ "$action" = '--configure' ]; then
+    set -- "$action" --profile "$root/var/lib/bunker-installer/$version/selection.json"
+    if [ -n "$locale" ]; then set -- "$@" "--locale=$locale"; fi
+    if [ -n "$non_interactive" ]; then set -- "$@" "$non_interactive"; fi
+    if [ -n "$choices" ]; then set -- "$@" "--choices-json=$choices"; fi
+    if [ -n "$probe_download" ]; then set -- "$@" "$probe_download"; fi
+    if [ -n "$space_root" ]; then set -- "$@" "--space-root=$space_root"; fi
+    if [ -n "$disk_layout" ]; then set -- "$@" "--disk-layout-json=$disk_layout"; fi
+    if [ -n "$min_free_after_bytes" ]; then set -- "$@" "--min-free-after-bytes=$min_free_after_bytes"; fi
+    ops_root="$root/opt/bunker/selection-releases"
+else
+    set -- --source-root "$root/opt/bunker/module-sources" \
+        --install-root "$root/opt/bunker" --state-root "$root/var/lib/bunker-platform" "$action"
+    ops_root="$root/opt/bunker/releases"
+fi
 python3 "$trusted_bootstrap" \
-    --manifest-url "$release/release-1.0.0.json" \
-    --signature-url "$release/release-1.0.0.sig" \
+    --manifest-url "$release/release-$version.json" \
+    --signature-url "$release/release-$version.sig" \
     --public-key-url "$release/bunker-product-release-2026.pem" \
-    --cache "$root/var/cache/bunker-ai/1.0.0" \
-    --ops-root "$root/opt/bunker/releases" \
-    --source-root "$root/opt/bunker/module-sources" \
-    --install-root "$root/opt/bunker" \
-    --state-root "$root/var/lib/bunker-platform" \
-    "$1"
+    --cache "$root/var/cache/bunker-ai/$version" --ops-root "$ops_root" "$@"
