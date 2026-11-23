@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 PRODUCT_KEY_FINGERPRINT = "1e7ad26b66b4f5eab9e60f9ae630b3f57f59fd19fe8c33dfadf3282b4127ae5b"
 MAX_OPS_BYTES = 1024 * 1024 * 1024
 RELEASE_SCHEMAS = {"1.0.0": "bunker.appliance-release/v1", "1.1.0": "bunker.appliance-release/v2"}
+CONFIGURE_CANCELLED = 3
 
 
 class BootstrapError(RuntimeError):
@@ -228,7 +229,7 @@ def bootstrap(manifest_url: str, signature_url: str, public_key_url: str,
 
 def configure_product(manifest_url: str, signature_url: str, public_key_url: str, cache: Path, ops_root: Path,
                       profile: Path, *, non_interactive: bool, choices: Path | None, probe_download: bool,
-                      space_root: Path | None = None, min_free_after_bytes: int = 0) -> Path:
+                      space_root: Path | None = None, min_free_after_bytes: int = 0) -> Path | None:
     if choices is not None and not non_interactive:
         raise BootstrapError("choices file requires non-interactive configuration")
     if type(min_free_after_bytes) is not int or min_free_after_bytes < 0:
@@ -254,7 +255,10 @@ def configure_product(manifest_url: str, signature_url: str, public_key_url: str
             command += ["--space-root", str(space_root)]
         if min_free_after_bytes:
             command += ["--min-free-after-bytes", str(min_free_after_bytes)]
-        subprocess.run(command, check=True)
+        result = subprocess.run(command, check=False)
+        if result.returncode == CONFIGURE_CANCELLED and not non_interactive:
+            return None
+        result.check_returncode()
     return target
 
 
@@ -354,7 +358,10 @@ def main() -> int:
         except (BootstrapError, OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
             print(f"Bunker AI bootstrap: {error}", file=sys.stderr)
             return 1
-        print(json.dumps({"ok": True, "ops_source": str(target), "step": "configure"}))
+        result = {"ok": True, "step": "configure", "saved": target is not None}
+        if target is not None:
+            result["ops_source"] = str(target)
+        print(json.dumps(result))
         return 0
     if (args.profile or args.non_interactive or args.choices_json or args.probe_download or args.space_root
             or args.min_free_after_bytes is not None):
