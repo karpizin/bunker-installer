@@ -283,6 +283,65 @@ print(json.dumps(result))
                                 bootstrap.prepare_profile(*self.arguments[:3], cache, ops, root.name)
                             stage.assert_not_called()
 
+    def test_offline_profile_replays_only_local_verified_inputs(self):
+        trust, archive = self.local_geo_fixture("product-11-prepare.py", b"""import json, sys
+from pathlib import Path
+assert sys.argv[-1] == "--offline"
+opts = dict(zip(sys.argv[1:-1:2], sys.argv[2:-1:2]))
+scope = json.loads(Path(opts["--profile"]).read_bytes())["selection"]["scope"]
+assert ("--geo-content-root" in opts) == (scope == "full")
+result = {"ok": True, "offline": True, "activated": False, "platform_inputs": {"transport_only": True}}
+if scope == "full":
+    result["geo_inputs"] = {"pack_signatures_verified": True}
+print(json.dumps(result))
+""")
+        manifest = trust / "release-1.1.0.json"
+        signature = trust / "release-1.1.0.sig"
+        release = json.loads(manifest.read_bytes())
+        release["platform_release"]["tag"] = "v1.1.0-rc1"
+        release["delivery_profiles"] = {"schema_version": "bunker.11-install-delivery/v1"}
+        manifest.write_text(json.dumps(release), encoding="utf-8")
+        subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(self.private),
+                        "-out", str(signature), str(manifest)], check=True, capture_output=True)
+        root = self.root / "release-110-offline"
+        cache, ops = root / "var/cache/bunker-ai/1.1.0", root / "opt/bunker/selection-releases"
+        profile = root / "var/lib/bunker-installer/1.1.0/selection.json"
+        profile.parent.mkdir(parents=True)
+        shutil.copytree(trust, cache / "trust")
+        cached_archive = cache / release["distribution"]["ops_source"]["path"]
+        cached_archive.parent.mkdir()
+        shutil.copyfile(archive, cached_archive)
+        url = "https://example.invalid/v1.1.0-rc1/release-1.1.0.json"
+        with patch.object(bootstrap, "ACCEPTANCE_HOME", self.root), \
+                patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \
+                patch.object(bootstrap, "curl", side_effect=AssertionError("offline mode accessed network")) as curl:
+            for scope in ("base", "full"):
+                original = json.dumps({"release_manifest_sha256": bootstrap.sha256(manifest),
+                                       "selection": {"scope": scope}})
+                profile.write_text(original, encoding="utf-8")
+                with redirect_stdout(io.StringIO()) as output:
+                    bootstrap.prepare_profile(url, "", "", cache, ops, root.name, offline=True)
+                prepared = json.loads(output.getvalue())
+                self.assertTrue(prepared["offline"])
+                self.assertEqual("geo_inputs" in prepared, scope == "full")
+                snapshot = bootstrap.prepared_profile_files(root, prepared["prepared_profile_id"])
+                self.assertEqual((snapshot / "selection.json").read_text(encoding="utf-8"), original)
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "release tag does not match"):
+                bootstrap.prepare_profile(url.replace("-rc1/", "-rc2/"), "", "", cache, ops, root.name, offline=True)
+            cached_signature = cache / "trust" / signature.name
+            cached_signature.write_bytes(b"x" * ((64 << 10) + 1))
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "trust file exceeds its size limit"):
+                bootstrap.prepare_profile(url, "", "", cache, ops, root.name, offline=True)
+            shutil.copyfile(signature, cached_signature)
+            cached_archive.write_bytes(b"bad ops archive")
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "checksum mismatch before staging"):
+                bootstrap.prepare_profile(url, "", "", cache, ops, root.name, offline=True)
+            cached_signature.unlink()
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "local trust cache"):
+                bootstrap.prepare_profile(url, "", "", cache, ops, root.name, offline=True)
+            self.assertEqual(len(tuple((root / "var/lib/bunker-profile/prepared").iterdir())), 2)
+            curl.assert_not_called()
+
     def test_wikipedia_bootstrap_verifies_local_ops_and_prepared_profiles_without_network(self):
         trust, _ = self.local_geo_fixture(
             "product-11-prepare.py", b'print(\'{"ok": true, "activated": false, "platform_inputs": {"transport_only": true}}\')\n',

@@ -25,6 +25,7 @@ CONFIGURE_CANCELLED = 3
 ACCEPTANCE_HOME = Path("/var/lib/bunker-acceptance-11")
 PROFILE_ID = re.compile(r"[0-9a-f]{64}")
 TRUST_FILES = ("release-1.1.0.json", "release-1.1.0.sig", "bunker-product-release-2026.pem")
+OFFLINE_TRUST_LIMITS = (2 << 20, 64 << 10, 64 << 10)
 
 
 class BootstrapError(RuntimeError):
@@ -381,8 +382,34 @@ def save_prepared_profile(root: Path, trust: Path, profile_id: str) -> None:
                 raise BootstrapError("prepared profile trust snapshot differs from the existing snapshot")
 
 
+def offline_profile_source(manifest_url: str, cache: Path, trust: Path, ops_root: Path) -> Path:
+    cached = tuple(cache / "trust" / name for name in TRUST_FILES)
+    check_profile_paths(*cached)
+    if not all(path.is_file() for path in cached):
+        raise BootstrapError("offline staging requires the signed 1.1 release files in the local trust cache")
+    for source, limit in zip(cached, OFFLINE_TRUST_LIMITS):
+        with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= limit:
+                raise BootstrapError("offline trust file exceeds its size limit or is not a regular file")
+            payload = stream.read(limit + 1)
+        if len(payload) != info.st_size:
+            raise BootstrapError("offline trust file size changed while reading")
+        (trust / source.name).write_bytes(payload)
+    manifest, signature, key = (trust / name for name in TRUST_FILES)
+    verify_signature(manifest, signature, key)
+    pin = ops_pin(manifest, "1.1.0")
+    release = json.loads(manifest.read_bytes())
+    requested_tag = Path(urlsplit(https_url(manifest_url)).path).parent.name
+    if release["platform_release"].get("tag") != requested_tag:
+        raise BootstrapError("offline signed release tag does not match the requested release tag")
+    archive = cache / str(pin["path"])
+    check_profile_paths(archive)
+    return stage_ops(archive, pin, ops_root)
+
+
 def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
-                    cache: Path, ops_root: Path, acceptance_id: str) -> None:
+                    cache: Path, ops_root: Path, acceptance_id: str, *, offline: bool = False) -> None:
     root = acceptance_profile_root(cache, ops_root, acceptance_id)
     profile = root / "var/lib/bunker-installer/1.1.0/selection.json"
     common = profile_destinations(root, include_geo=False)
@@ -392,8 +419,11 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
 
     with tempfile.TemporaryDirectory(prefix="bunker-profile-trust-") as directory:
         trust = Path(directory)
-        target = bootstrap(manifest_url, signature_url, public_key_url, cache, ops_root,
-                           release_version="1.1.0", private_trust=trust)
+        if offline:
+            target = offline_profile_source(manifest_url, cache, trust, ops_root)
+        else:
+            target = bootstrap(manifest_url, signature_url, public_key_url, cache, ops_root,
+                               release_version="1.1.0", private_trust=trust)
         snapshot = trust / "selection.json"
         snapshot.write_bytes(profile.read_bytes())
         snapshot.chmod(0o400)
@@ -423,9 +453,13 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
                    "--min-free-after-bytes", str(80 * 1024**3)]
         for name, path in destinations.items():
             command += ["--" + name, str(path)]
+        if offline:
+            command.append("--offline")
         result = json.loads(subprocess.check_output(command, text=True))
         if not isinstance(result, dict) or result.get("ok") is not True or result.get("activated") is not False:
             raise BootstrapError("verified Ops preparer did not report successful staging")
+        if offline and result.get("offline") is not True:
+            raise BootstrapError("verified Ops preparer did not confirm offline staging")
         inputs = result.get("platform_inputs")
         if not isinstance(inputs, dict) or inputs.get("transport_only") is not True:
             raise BootstrapError("verified Ops preparer did not stage the base platform inputs")
@@ -646,6 +680,7 @@ def main() -> int:
                         help="setup language only (default: en)")
     parser.add_argument("--choices-json", type=Path)
     parser.add_argument("--probe-download", action="store_true")
+    parser.add_argument("--offline", action="store_true", help="use only verified local caches for --prepare-profile")
     parser.add_argument("--space-root", type=Path)
     parser.add_argument("--disk-layout-json", type=Path)
     parser.add_argument("--min-free-after-bytes", type=int)
@@ -653,6 +688,8 @@ def main() -> int:
     parser.add_argument("--install-root", type=Path)
     parser.add_argument("--state-root", type=Path)
     args = parser.parse_args()
+    if args.offline and args.prepare_profile is None:
+        parser.error("--offline requires --prepare-profile")
     if args.configure:
         if args.profile is None or (args.choices_json is not None and not args.non_interactive):
             parser.error("--configure requires --profile; --choices-json requires --non-interactive")
@@ -679,7 +716,7 @@ def main() -> int:
             parser.error("profile preparation does not take explicit service or install roots")
         try:
             prepare_profile(args.manifest_url, args.signature_url, args.public_key_url,
-                            args.cache, args.ops_root, args.prepare_profile)
+                            args.cache, args.ops_root, args.prepare_profile, offline=args.offline)
         except (BootstrapError, OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
             print(f"Bunker AI bootstrap: {error}", file=sys.stderr)
             return 1

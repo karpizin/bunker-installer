@@ -5,7 +5,7 @@ set -eu
 usage() {
     printf '%s\n' 'Usage: sudo sh install.sh --prepare|--install-platform|--initialize-n8n|--activate-modules' \
         '       sudo sh install.sh --configure [--locale en|ru|zh-Hans] [--non-interactive [--choices-json FILE]] [--space-root DIR | --disk-layout-json FILE] [--min-free-after-bytes BYTES] [--probe-download]' \
-        '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --prepare-profile' \
+        '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --prepare-profile [--offline]' \
         '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --wikipedia setup-index|start-voice|start-operator|verify-chat|attach-chat|start-chat|install-base PROFILE_SHA256' \
         '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --wikipedia activate|recover PROFILE_SHA256 [ROLLBACK_SHA256]' \
         '       sudo sh install.sh --geo activate|recover|restart TRUST_DIR -- [managed Geo options]' \
@@ -24,7 +24,7 @@ fi
 action=$1
 shift
 version=1.0.0
-non_interactive='' choices='' probe_download='' space_root='' min_free_after_bytes='' disk_layout='' locale=''
+non_interactive='' choices='' probe_download='' space_root='' min_free_after_bytes='' disk_layout='' locale='' offline=''
 case "$action" in
     --wikipedia)
         if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then usage >&2; exit 2; fi
@@ -84,7 +84,11 @@ case "$action" in
         if [ -n "$space_root" ] && [ -n "$disk_layout" ]; then usage >&2; exit 2; fi
         ;;
     --prepare-profile)
-        if [ "$#" -ne 0 ]; then usage >&2; exit 2; fi
+        case "$#" in
+            0) ;;
+            1) if [ "$1" != '--offline' ]; then usage >&2; exit 2; fi; offline=--offline ;;
+            *) usage >&2; exit 2 ;;
+        esac
         version=1.1.0
         ;;
     --prepare|--install-platform|--initialize-n8n|--activate-modules)
@@ -96,7 +100,9 @@ if [ "$(id -u)" -ne 0 ]; then
     printf '%s\n' 'Bunker AI installation requires root.' >&2
     exit 1
 fi
-for tool in sha256sum python3 openssl curl tar; do
+set_tools='sha256sum python3 openssl tar'
+if [ -z "$offline" ]; then set_tools="$set_tools curl"; fi
+for tool in $set_tools; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         printf 'Missing bootstrap command: %s\n' "$tool" >&2
         exit 1
@@ -109,7 +115,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='0e0ca6f91c91e84a39bccf975a7504af17459230c0ba5bc1e4e6180aac4396d5'
+bootstrap_sha256='041df5b226a85631f32c02bdfb06a4e2c26a91af18de05421d879992ac0cd156'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
@@ -201,6 +207,7 @@ elif [ "$action" = '--prepare-profile' ]; then
         exit 2
     fi
     set -- "$action" "$acceptance_id"
+    if [ -n "$offline" ]; then set -- "$@" "$offline"; fi
     ops_root="$root/opt/bunker/selection-releases"
 else
     set -- --source-root "$root/opt/bunker/module-sources" \

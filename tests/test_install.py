@@ -173,6 +173,18 @@ class InstallEntryTests(unittest.TestCase):
                                 "--ops-root", root + "/opt/bunker/selection-releases",
                                 "--trust-dir", "/tmp/release trust", "--", "--profile", "/tmp/my profile"])
 
+    def test_offline_flag_is_forwarded_only_for_saved_11_profile_staging(self):
+        self.env.update(BUNKER_ACCEPTANCE_ID="release-110-offline", BUNKER_RELEASE_TAG="v1.1.0-rc1")
+        result = self.run_install("--prepare-profile", "--offline")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.log.read_text().splitlines()[-3:],
+                         ["--prepare-profile", "release-110-offline", "--offline"])
+        self.log.unlink()
+        for args in (("--configure", "--offline"), ("--prepare", "--offline"),
+                     ("--prepare-profile", "--offline", "--offline")):
+            self.assertEqual(self.run_install(*args).returncode, 2)
+            self.assertFalse(self.log.exists())
+
     def test_wikipedia_passes_only_prepared_profile_ids_for_the_candidate(self):
         self.env.update(BUNKER_ACCEPTANCE_ID="release-110-rc1")
         result = self.run_install("--wikipedia", "recover", "a" * 64, "b" * 64)

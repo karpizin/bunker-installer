@@ -73,6 +73,15 @@ weights. It reuses verified cache entries and does not download the legacy
 Wikipedia archive or a second copy of the selected GGUF into this cache.
 The `platform_inputs.transport_only` and `activated: false` fields are staging
 evidence only: the base services and images are not provisioned by this step.
+
+For a saved profile whose caches are already populated, add `--offline` to
+`--prepare-profile`. Under the same acceptance root, put the signed manifest,
+detached signature and pinned public key in `var/cache/bunker-ai/1.1.0/trust/`
+and the verified Ops archive at its manifest-provided cache path. Preparation
+checks the requested release tag, saved profile and selected cache bytes.
+Missing or damaged files fail without fetching replacements. Full requires
+the local pinned Geo verifier image; Basic does not touch Geo. This mode does
+not load host packages or container images, import a USB kit, or start services.
 It also returns `prepared_profile_id`: the SHA-256 of the saved selection,
 retained with the verified release trust files under the same acceptance root.
 A different candidate requires its own manifest-bound selection.
