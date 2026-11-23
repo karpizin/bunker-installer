@@ -389,12 +389,16 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
         command = [sys.executable, "-B", str(script), "--manifest", str(trust / "release-1.1.0.json"),
                    "--signature", str(trust / "release-1.1.0.sig"), "--public-key",
                    str(trust / "bunker-product-release-2026.pem"), "--profile", str(snapshot),
-                   "--source-root", str(target), "--min-free-after-bytes", str(80 * 1024**3)]
+                   "--source-root", str(target), "--distribution-root", str(cache),
+                   "--min-free-after-bytes", str(80 * 1024**3)]
         for name, path in destinations.items():
             command += ["--" + name, str(path)]
         result = json.loads(subprocess.check_output(command, text=True))
         if not isinstance(result, dict) or result.get("ok") is not True or result.get("activated") is not False:
             raise BootstrapError("verified Ops preparer did not report successful staging")
+        inputs = result.get("platform_inputs")
+        if not isinstance(inputs, dict) or inputs.get("transport_only") is not True:
+            raise BootstrapError("verified Ops preparer did not stage the base platform inputs")
         save_prepared_profile(root, trust, profile_id)
         print(json.dumps({**result, "prepared_profile_id": profile_id}, sort_keys=True))
 

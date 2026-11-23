@@ -123,7 +123,7 @@ assert json.loads(Path(opts["--manifest"]).read_bytes())["platform_release"]["ve
 assert json.loads(Path(opts["--profile"]).read_bytes())["selection"] == {"name": "saved"}
 assert Path(opts["--source-root"]) == Path(__file__).parents[2]
 assert int(opts["--min-free-after-bytes"]) == 80 * 1024**3
-print(json.dumps({"ok": True, "activated": False, "options": opts}))
+print(json.dumps({"ok": True, "activated": False, "options": opts, "platform_inputs": {"transport_only": True}}))
 """)
         self.urls[self.arguments[0]] = trust / "release-1.1.0.json"
         self.urls[self.arguments[1]] = trust / "release-1.1.0.sig"
@@ -149,6 +149,7 @@ print(json.dumps({"ok": True, "activated": False, "options": opts}))
             self.assertEqual(Path(opts["--geo-content-root"]), acceptance / "var/lib/bunker-platform/modules/geo/content")
             self.assertEqual(Path(opts["--model-root"]), acceptance / "var/lib/bunker-profile/models")
             self.assertEqual(Path(opts["--runtime-staging-root"]), acceptance / "var/lib/bunker-profile/runtime")
+            self.assertEqual(Path(opts["--distribution-root"]), cache)
             self.assertFalse(Path(opts["--manifest"]).exists())
             self.assertEqual(profile.read_text(), original)
             bundle = bootstrap.prepared_profile_files(acceptance, result["prepared_profile_id"])
@@ -173,7 +174,7 @@ Path(options['--env-file']).write_text(json.dumps({
 }))
 """
         trust, _ = self.local_geo_fixture(
-            "product-11-prepare.py", b'print(\'{"ok": true, "activated": false}\')\n',
+            "product-11-prepare.py", b'print(\'{"ok": true, "activated": false, "platform_inputs": {"transport_only": true}}\')\n',
             extra_scripts=[("scripts/install/product-geo-service.py", handler)])
         self.urls[self.arguments[0]] = trust / "release-1.1.0.json"
         self.urls[self.arguments[1]] = trust / "release-1.1.0.sig"
@@ -242,7 +243,7 @@ Path(options['--env-file']).write_text(json.dumps({
 
     def test_wikipedia_bootstrap_verifies_local_ops_and_prepared_profiles_without_network(self):
         trust, _ = self.local_geo_fixture(
-            "product-11-prepare.py", b'print(\'{"ok": true, "activated": false}\')\n',
+            "product-11-prepare.py", b'print(\'{"ok": true, "activated": false, "platform_inputs": {"transport_only": true}}\')\n',
             extra_scripts=[("scripts/install/product-11-wikipedia.py", b'import sys; assert sys.argv[1] in ("activate", "recover")\n')])
         self.urls[self.arguments[0]] = trust / "release-1.1.0.json"
         self.urls[self.arguments[1]] = trust / "release-1.1.0.sig"

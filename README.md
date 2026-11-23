@@ -67,8 +67,13 @@ After a signed 1.1 candidate is staged, use the same `BUNKER_RELEASE_TAG` and
 The latter verifies the signed release again and passes the saved profile and
 private staging directories to the Ops preparer. It preserves an 80 GiB
 free-space floor and does not start the platform, index Wikipedia, or activate
-models or maps. Use the preparer's `activated: false` report as staging evidence
-only. It also returns `prepared_profile_id`: the SHA-256 of the saved selection,
+models or maps. The prep also stages the signed platform manifest, runtime
+transport, operator binaries and mandatory assets such as embedding and voice
+weights. It reuses verified cache entries and does not download the legacy
+Wikipedia archive or a second copy of the selected GGUF into this cache.
+The `platform_inputs.transport_only` and `activated: false` fields are staging
+evidence only: the base services and images are not provisioned by this step.
+It also returns `prepared_profile_id`: the SHA-256 of the saved selection,
 retained with the verified release trust files under the same acceptance root.
 A different candidate requires its own manifest-bound selection.
 
