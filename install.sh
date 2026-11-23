@@ -7,6 +7,7 @@ usage() {
         '       sudo sh install.sh --configure [--locale en|ru|zh-Hans] [--non-interactive [--choices-json FILE]] [--space-root DIR | --disk-layout-json FILE] [--min-free-after-bytes BYTES] [--probe-download]' \
         '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --prepare-profile' \
         '       sudo sh install.sh --geo activate|recover|restart TRUST_DIR -- [managed Geo options]' \
+        '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --geo activate|recover|restart prepared:PROFILE_SHA256 -- [managed Geo options]' \
         'Use the complete release bundle; piping this script alone to sh is unsupported.'
 }
 
@@ -94,7 +95,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='2f481f9ccaa6b2fbc131d105795cc4de15db84db820ec99eca588cf799f3c869'
+bootstrap_sha256='2850d12cf49a4771a3bc59d2efc82c61f7c96f09c1508950704ff732f11e5dad'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
@@ -133,9 +134,18 @@ if [ "$action" = '--geo' ]; then
     case "$acceptance_id" in
         release-100-*) printf '%s\n' 'Managed Geo requires a separate 1.1 project, not a 1.0 acceptance root.' >&2; exit 2 ;;
     esac
-    python3 "$trusted_bootstrap" --geo "$geo_action" --trust-dir "$geo_trust" \
-        --ops-cache "$root/var/cache/bunker-ai/$version" \
-        --ops-root "$root/opt/bunker/selection-releases" -- "$@"
+    case "$geo_trust" in
+        prepared:*)
+            if ! printf '%s\n' "$acceptance_id" | grep -Eq '^release-110-[A-Za-z0-9][A-Za-z0-9._-]{0,51}$'; then
+                printf '%s\n' 'Prepared Geo requires a separate release-110-* acceptance ID.' >&2
+                exit 2
+            fi
+            set -- --prepared-profile "${geo_trust#prepared:}" --acceptance-id "$acceptance_id" -- "$@"
+            ;;
+        *) set -- --trust-dir "$geo_trust" -- "$@" ;;
+    esac
+    python3 "$trusted_bootstrap" --geo "$geo_action" --ops-cache "$root/var/cache/bunker-ai/$version" \
+        --ops-root "$root/opt/bunker/selection-releases" "$@"
     exit
 fi
 if [ "$action" = '--configure' ]; then

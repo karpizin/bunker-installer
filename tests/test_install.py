@@ -169,10 +169,20 @@ class InstallEntryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         opts = self.log.read_text().splitlines()[1:]
         root = "/var/lib/bunker-acceptance/release-110-geo"
-        self.assertEqual(opts, ["--geo", "recover", "--trust-dir", "/tmp/release trust",
-                                "--ops-cache", root + "/var/cache/bunker-ai/1.1.0",
+        self.assertEqual(opts, ["--geo", "recover", "--ops-cache", root + "/var/cache/bunker-ai/1.1.0",
                                 "--ops-root", root + "/opt/bunker/selection-releases",
-                                "--", "--profile", "/tmp/my profile"])
+                                "--trust-dir", "/tmp/release trust", "--", "--profile", "/tmp/my profile"])
+
+    def test_prepared_geo_routes_to_the_isolated_acceptance_root(self):
+        identity = "a" * 64
+        result = self.run_install("--geo", "activate", f"prepared:{identity}", "--")
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.log.exists())
+        self.env.update(BUNKER_ACCEPTANCE_ID="release-110-geo")
+        result = self.run_install("--geo", "recover", f"prepared:{identity}", "--", "--rollback-prepared=" + "b" * 64)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.log.read_text().splitlines()[-6:], [
+            "--prepared-profile", identity, "--acceptance-id", "release-110-geo", "--", "--rollback-prepared=" + "b" * 64])
 
     def test_geo_refuses_invalid_action_or_legacy_acceptance_root(self):
         self.assertEqual(self.run_install("--geo", "down", "/trust", "--").returncode, 2)

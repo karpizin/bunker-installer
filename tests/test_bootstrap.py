@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -76,7 +77,7 @@ class BootstrapTests(unittest.TestCase):
     def download(self, url, destination, *, resume):
         shutil.copyfile(self.urls[url], destination)
 
-    def local_geo_fixture(self, script_name="product-geo-service.py", script=None):
+    def local_geo_fixture(self, script_name="product-geo-service.py", script=None, extra_scripts=()):
         if script is None:
             script = b"""import json, sys
 from pathlib import Path
@@ -89,7 +90,7 @@ assert manifest["platform_release"]["version"] == "1.1.0"
 Path(opts["--profile"]).write_text(action)
 """
         with tarfile.open(self.archive, "w:gz") as package:
-            for name, payload in (("VERSION", b"0.2.25\n"), ("scripts/install/" + script_name, script)):
+            for name, payload in (("VERSION", b"0.2.25\n"), ("scripts/install/" + script_name, script), *extra_scripts):
                 entry = tarfile.TarInfo("bunker-ops-0.2.25/" + name)
                 entry.size = len(payload)
                 package.addfile(entry, io.BytesIO(payload))
@@ -119,10 +120,10 @@ opts = dict(zip(sys.argv[1::2], sys.argv[2::2]))
 assert Path(opts["--signature"]).is_file()
 assert Path(opts["--public-key"]).is_file()
 assert json.loads(Path(opts["--manifest"]).read_bytes())["platform_release"]["version"] == "1.1.0"
-assert Path(opts["--profile"]).read_text() == "saved profile"
+assert json.loads(Path(opts["--profile"]).read_bytes())["selection"] == {"name": "saved"}
 assert Path(opts["--source-root"]) == Path(__file__).parents[2]
 assert int(opts["--min-free-after-bytes"]) == 80 * 1024**3
-Path(opts["--profile"]).with_name("preparation-invoked").write_text(json.dumps(opts))
+print(json.dumps({"ok": True, "activated": False, "options": opts}))
 """)
         self.urls[self.arguments[0]] = trust / "release-1.1.0.json"
         self.urls[self.arguments[1]] = trust / "release-1.1.0.sig"
@@ -131,26 +132,90 @@ Path(opts["--profile"]).with_name("preparation-invoked").write_text(json.dumps(o
         ops = acceptance / "opt/bunker/selection-releases"
         profile = acceptance / "var/lib/bunker-installer/1.1.0/selection.json"
         profile.parent.mkdir(parents=True)
-        profile.write_text("saved profile")
-        marker = profile.with_name("preparation-invoked")
+        original = json.dumps({"release_manifest_sha256": bootstrap.sha256(trust / "release-1.1.0.json"),
+                               "selection": {"name": "saved"}})
+        profile.write_text(original)
         with patch.object(bootstrap, "ACCEPTANCE_HOME", self.root), \
                 patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \
                 patch.object(bootstrap, "curl", side_effect=self.download) as download:
-            bootstrap.prepare_profile(*self.arguments[:3], cache, ops, acceptance.name)
-            opts = json.loads(marker.read_text())
+            output = io.StringIO()
+            with redirect_stdout(output):
+                bootstrap.prepare_profile(*self.arguments[:3], cache, ops, acceptance.name)
+                bootstrap.prepare_profile(*self.arguments[:3], cache, ops, acceptance.name)
+            result, retry = (json.loads(line) for line in output.getvalue().splitlines())
+            self.assertEqual(result["prepared_profile_id"], retry["prepared_profile_id"])
+            opts = result["options"]
             self.assertEqual(Path(opts["--cache-root"]), acceptance / "var/cache/bunker-selected")
-            self.assertEqual(Path(opts["--geo-content-root"]), acceptance / "var/lib/bunker-profile/geography")
+            self.assertEqual(Path(opts["--geo-content-root"]), acceptance / "var/lib/bunker-platform/modules/geo/content")
             self.assertEqual(Path(opts["--model-root"]), acceptance / "var/lib/bunker-profile/models")
             self.assertEqual(Path(opts["--runtime-staging-root"]), acceptance / "var/lib/bunker-profile/runtime")
             self.assertFalse(Path(opts["--manifest"]).exists())
-            self.assertEqual(profile.read_text(), "saved profile")
-            marker.unlink()
+            self.assertEqual(profile.read_text(), original)
+            bundle = bootstrap.prepared_profile_files(acceptance, result["prepared_profile_id"])
+            self.assertEqual((bundle / "selection.json").read_text(), original)
+            self.assertEqual(stat.S_IMODE((bundle / "selection.json").stat().st_mode), 0o400)
             download.reset_mock()
             (trust / "release-1.1.0.json").write_bytes(b"tampered")
             with self.assertRaisesRegex(bootstrap.BootstrapError, "signature verification failed"):
                 bootstrap.prepare_profile(*self.arguments[:3], cache, ops, acceptance.name)
             self.assertEqual(download.call_count, 3)
-            self.assertFalse(marker.exists())
+            self.assertEqual(len(tuple(bundle.parent.iterdir())), 1)
+
+    def test_prepared_geo_uses_saved_profiles_for_activation_and_offline_recovery(self):
+        handler = b"""import json, sys
+from pathlib import Path
+options = dict(zip(sys.argv[2::2], sys.argv[3::2]))
+Path(options['--env-file']).write_text(json.dumps({
+    'action': sys.argv[1],
+    'selected': json.loads(Path(options['--profile']).read_bytes())['selection']['name'],
+    'rollback': json.loads(Path(options['--rollback-profile']).read_bytes())['selection']['name'],
+    'root': options['--content-root'],
+}))
+"""
+        trust, _ = self.local_geo_fixture(
+            "product-11-prepare.py", b'print(\'{"ok": true, "activated": false}\')\n',
+            extra_scripts=[("scripts/install/product-geo-service.py", handler)])
+        self.urls[self.arguments[0]] = trust / "release-1.1.0.json"
+        self.urls[self.arguments[1]] = trust / "release-1.1.0.sig"
+        acceptance = self.root / "release-110-geo"
+        cache = acceptance / "var/cache/bunker-ai/1.1.0"
+        ops = acceptance / "opt/bunker/selection-releases"
+        profile = acceptance / "var/lib/bunker-installer/1.1.0/selection.json"
+        profile.parent.mkdir(parents=True)
+        ids = {}
+        with patch.object(bootstrap, "ACCEPTANCE_HOME", self.root), \
+                patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \
+                patch.object(bootstrap, "curl", side_effect=self.download) as network:
+            for name in ("previous", "candidate"):
+                profile.write_text(json.dumps({"release_manifest_sha256": bootstrap.sha256(trust / "release-1.1.0.json"),
+                                               "selection": {"name": name}}))
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    bootstrap.prepare_profile(*self.arguments[:3], cache, ops, acceptance.name)
+                ids[name] = json.loads(output.getvalue())["prepared_profile_id"]
+            profile.unlink()
+            network.reset_mock()
+            marker = acceptance / "observed.json"
+            for action in ("activate", "recover"):
+                bootstrap.run_prepared_geo(action, ids["candidate"], cache, ops, acceptance.name,
+                                           [f'--rollback-prepared={ids["previous"]}', "--env-file", str(marker)])
+                self.assertEqual(json.loads(marker.read_bytes()), {
+                    "action": action, "selected": "candidate", "rollback": "previous",
+                    "root": str(acceptance / "var/lib/bunker-platform/modules/geo/content"),
+                })
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "cannot be overridden"):
+                bootstrap.run_prepared_geo("activate", ids["candidate"], cache, ops, acceptance.name,
+                                           ["--profile=/wrong"])
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "different profile"):
+                bootstrap.run_prepared_geo("recover", ids["candidate"], cache, ops, acceptance.name,
+                                           [f'--rollback-prepared={ids["candidate"]}'])
+            bundle = bootstrap.prepared_profile_files(acceptance, ids["candidate"])
+            snapshot = bundle / "selection.json"
+            snapshot.chmod(0o600)
+            snapshot.write_text("tampered")
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "snapshot is missing or changed"):
+                bootstrap.run_prepared_geo("recover", ids["candidate"], cache, ops, acceptance.name, [])
+            network.assert_not_called()
 
     def test_prepare_profile_refuses_missing_linked_or_legacy_paths_before_download(self):
         acceptance = self.root / "release-110-test"

@@ -23,6 +23,8 @@ MAX_OPS_BYTES = 1024 * 1024 * 1024
 RELEASE_SCHEMAS = {"1.0.0": "bunker.appliance-release/v1", "1.1.0": "bunker.appliance-release/v2"}
 CONFIGURE_CANCELLED = 3
 ACCEPTANCE_HOME = Path("/var/lib/bunker-acceptance")
+PROFILE_ID = re.compile(r"[0-9a-f]{64}")
+TRUST_FILES = ("release-1.1.0.json", "release-1.1.0.sig", "bunker-product-release-2026.pem")
 
 
 class BootstrapError(RuntimeError):
@@ -294,22 +296,27 @@ def prepare_product(target: Path, cache: Path, ops_root: Path,
     ], check=True)
 
 
-def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
-                    cache: Path, ops_root: Path, acceptance_id: str) -> None:
+def acceptance_profile_root(cache: Path, ops_root: Path, acceptance_id: str) -> Path:
     if not re.fullmatch(r"release-110-[A-Za-z0-9][A-Za-z0-9._-]{0,51}", acceptance_id):
         raise BootstrapError("profile preparation requires a separate release-110-* acceptance ID")
     root = ACCEPTANCE_HOME / acceptance_id
     if cache != root / "var/cache/bunker-ai/1.1.0" or ops_root != root / "opt/bunker/selection-releases":
         raise BootstrapError("profile preparation paths must belong to the selected acceptance root")
-    profile = root / "var/lib/bunker-installer/1.1.0/selection.json"
+    return root
+
+
+def profile_destinations(root: Path) -> dict[str, Path]:
     staging = root / "var/lib/bunker-profile"
-    destinations = {
+    return {
         "cache-root": root / "var/cache/bunker-selected",
         "model-root": staging / "models",
         "runtime-staging-root": staging / "runtime",
-        "geo-content-root": staging / "geography",
+        "geo-content-root": root / "var/lib/bunker-platform/modules/geo/content",
     }
-    for path in (cache, ops_root, profile, *destinations.values()):
+
+
+def check_profile_paths(*paths: Path) -> None:
+    for path in paths:
         for part in (path, *path.parents):
             try:
                 info = part.lstat()
@@ -321,6 +328,47 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
                 raise BootstrapError("profile preparation paths must be owned and protected")
             if part == ACCEPTANCE_HOME:
                 break
+
+
+def prepared_profile_files(root: Path, profile_id: str) -> Path:
+    if not PROFILE_ID.fullmatch(profile_id):
+        raise BootstrapError("prepared profile ID must be a SHA-256")
+    bundle = root / "var/lib/bunker-profile/prepared" / profile_id
+    paths = tuple(bundle / name for name in (*TRUST_FILES, "selection.json"))
+    check_profile_paths(*paths)
+    if not all(path.is_file() for path in paths) or sha256(bundle / "selection.json") != profile_id:
+        raise BootstrapError("prepared profile snapshot is missing or changed")
+    return bundle
+
+
+def save_prepared_profile(root: Path, trust: Path, profile_id: str) -> None:
+    parent = root / "var/lib/bunker-profile/prepared"
+    check_profile_paths(parent)
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    destination = parent / profile_id
+    with tempfile.TemporaryDirectory(prefix=".prepared-", dir=parent) as directory:
+        staged = Path(directory) / "bundle"
+        staged.mkdir(mode=0o700)
+        for name in (*TRUST_FILES, "selection.json"):
+            path = staged / name
+            shutil.copyfile(trust / name, path)
+            path.chmod(0o400)
+        try:
+            staged.rename(destination)
+        except OSError:
+            if not destination.is_dir() or destination.is_symlink():
+                raise
+            prior = prepared_profile_files(root, profile_id)
+            if any(sha256(staged / name) != sha256(prior / name) for name in (*TRUST_FILES, "selection.json")):
+                raise BootstrapError("prepared profile trust snapshot differs from the existing snapshot")
+
+
+def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
+                    cache: Path, ops_root: Path, acceptance_id: str) -> None:
+    root = acceptance_profile_root(cache, ops_root, acceptance_id)
+    profile = root / "var/lib/bunker-installer/1.1.0/selection.json"
+    destinations = profile_destinations(root)
+    check_profile_paths(cache, ops_root, profile, root / "var/lib/bunker-profile/prepared", *destinations.values())
     if not profile.is_file():
         raise BootstrapError("no saved profile in this acceptance root; run --configure first")
 
@@ -328,16 +376,27 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
         trust = Path(directory)
         target = bootstrap(manifest_url, signature_url, public_key_url, cache, ops_root,
                            release_version="1.1.0", private_trust=trust)
+        snapshot = trust / "selection.json"
+        snapshot.write_bytes(profile.read_bytes())
+        snapshot.chmod(0o400)
+        saved = json.loads(snapshot.read_bytes())
+        if not isinstance(saved, dict) or saved.get("release_manifest_sha256") != sha256(trust / TRUST_FILES[0]):
+            raise BootstrapError("saved profile is not bound to the verified 1.1 manifest")
+        profile_id = sha256(snapshot)
         script = target / "scripts/install/product-11-prepare.py"
         if not script.is_file() or script.is_symlink():
             raise BootstrapError("verified Ops source lacks the 1.1 profile preparation tool")
         command = [sys.executable, "-B", str(script), "--manifest", str(trust / "release-1.1.0.json"),
                    "--signature", str(trust / "release-1.1.0.sig"), "--public-key",
-                   str(trust / "bunker-product-release-2026.pem"), "--profile", str(profile),
+                   str(trust / "bunker-product-release-2026.pem"), "--profile", str(snapshot),
                    "--source-root", str(target), "--min-free-after-bytes", str(80 * 1024**3)]
         for name, path in destinations.items():
             command += ["--" + name, str(path)]
-        subprocess.run(command, check=True)
+        result = json.loads(subprocess.check_output(command, text=True))
+        if not isinstance(result, dict) or result.get("ok") is not True or result.get("activated") is not False:
+            raise BootstrapError("verified Ops preparer did not report successful staging")
+        save_prepared_profile(root, trust, profile_id)
+        print(json.dumps({**result, "prepared_profile_id": profile_id}, sort_keys=True))
 
 
 def run_product_step(target: Path, cache: Path, ops_root: Path, source_root: Path,
@@ -392,7 +451,7 @@ def run_local_geo(action: str, trust: Path, cache: Path, ops_root: Path, options
     if any(not path.is_absolute() or path == Path("/") or path.resolve() != path
            for path in (trust, cache, ops_root)):
         raise BootstrapError("Geo trust, cache and Ops roots must be canonical absolute directories")
-    names = ("release-1.1.0.json", "release-1.1.0.sig", "bunker-product-release-2026.pem")
+    names = TRUST_FILES
     with tempfile.TemporaryDirectory(prefix="bunker-geo-trust-") as directory:
         snapshot = Path(directory)
         for name in names:
@@ -416,10 +475,41 @@ def run_local_geo(action: str, trust: Path, cache: Path, ops_root: Path, options
         ], check=True)
 
 
+def run_prepared_geo(action: str, profile_id: str, cache: Path, ops_root: Path,
+                     acceptance_id: str, options: list[str]) -> None:
+    root = acceptance_profile_root(cache, ops_root, acceptance_id)
+    bundle = prepared_profile_files(root, profile_id)
+    paths = profile_destinations(root)
+    # Paths internal to the preparation cannot be replaced by caller options.
+    reserved = {"--profile", "--cache-root", "--content-root", "--min-free-after-bytes",
+                "--rollback-manifest", "--rollback-signature", "--rollback-profile", "--rollback-cache-root"}
+    if any(option.split("=", 1)[0] in reserved for option in options):
+        raise BootstrapError("prepared Geo paths and safety floor cannot be overridden")
+    check_profile_paths(cache, ops_root, paths["cache-root"], paths["geo-content-root"])
+    rollback = [option for option in options if option.split("=", 1)[0] == "--rollback-prepared"]
+    previous = []
+    if rollback:
+        if action == "restart" or len(rollback) != 1 or "=" not in rollback[0]:
+            raise BootstrapError("use one --rollback-prepared=SHA256 for prepared Geo activation or recovery")
+        old_id = rollback[0].split("=", 1)[1]
+        if old_id == profile_id:
+            raise BootstrapError("prepared Geo rollback must use a different profile")
+        old = prepared_profile_files(root, old_id)
+        previous = ["--rollback-manifest", str(old / TRUST_FILES[0]), "--rollback-signature", str(old / TRUST_FILES[1]),
+                    "--rollback-profile", str(old / "selection.json"), "--rollback-cache-root", str(paths["cache-root"])]
+    run_local_geo(action, bundle, cache, ops_root,
+                  ["--profile", str(bundle / "selection.json"), "--cache-root", str(paths["cache-root"]),
+                   "--content-root", str(paths["geo-content-root"]), "--min-free-after-bytes", str(80 * 1024**3),
+                   *previous, *(option for option in options if option not in rollback)])
+
+
 def geo_entry(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="product-bootstrap.py --geo", allow_abbrev=False)
     parser.add_argument("action", choices=("activate", "recover", "restart"))
-    parser.add_argument("--trust-dir", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--trust-dir", type=Path)
+    source.add_argument("--prepared-profile")
+    parser.add_argument("--acceptance-id")
     parser.add_argument("--ops-cache", type=Path, required=True)
     parser.add_argument("--ops-root", type=Path, required=True)
     if "--" not in argv:
@@ -427,7 +517,13 @@ def geo_entry(argv: list[str]) -> int:
     split = argv.index("--")
     args = parser.parse_args(argv[:split])
     try:
-        run_local_geo(args.action, args.trust_dir, args.ops_cache, args.ops_root, argv[split + 1:])
+        if args.prepared_profile is not None:
+            if args.acceptance_id is None:
+                parser.error("prepared Geo requires a 1.1 acceptance ID")
+            run_prepared_geo(args.action, args.prepared_profile, args.ops_cache, args.ops_root,
+                             args.acceptance_id, argv[split + 1:])
+        else:
+            run_local_geo(args.action, args.trust_dir, args.ops_cache, args.ops_root, argv[split + 1:])
     except (BootstrapError, OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
         print(f"Bunker AI Geo bootstrap: {error}", file=sys.stderr)
         return 1

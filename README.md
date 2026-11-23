@@ -68,7 +68,9 @@ The latter verifies the signed release again and passes the saved profile and
 private staging directories to the Ops preparer. It preserves an 80 GiB
 free-space floor and does not start the platform, index Wikipedia, or activate
 models or maps. Use the preparer's `activated: false` report as staging evidence
-only. A different candidate requires its own manifest-bound selection.
+only. It also returns `prepared_profile_id`: the SHA-256 of the saved selection,
+retained with the verified release trust files under the same acceptance root.
+A different candidate requires its own manifest-bound selection.
 
 ## Managed geography (1.1 development only)
 
@@ -79,6 +81,17 @@ its detached signature (`release-1.1.0.sig`) and the pinned product public key
 be in the 1.1 cache at the manifest's pinned path. This command does not fetch
 trust files, Ops or content. It runs only the managed Geo command from the
 verified Ops archive.
+
+With the same `release-110-*` acceptance ID you can use
+`--geo activate prepared:PROFILE_SHA256 -- [managed project options]` instead of
+assembling a trust directory manually. The profile, selected cache and Geo
+content directory come from preparation, not caller overrides. Supply the
+trusted Compose definition, module environment, dedicated project and loopback
+port explicitly. An update or its recovery can name the original profile with
+`--rollback-prepared=PREVIOUS_PROFILE_SHA256` after the separator. This reuses
+the saved profile even if `--configure` has changed the current choice. The
+original signed artifacts must remain in the caches. `restart` cannot switch
+profiles or recover an incomplete transaction.
 
 Prepare a signed selection and staged Geo generation first. Supply only the
 trusted Compose definition, private module environment and dedicated Geo
