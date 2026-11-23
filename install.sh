@@ -4,7 +4,7 @@ set -eu
 
 usage() {
     printf '%s\n' 'Usage: sudo sh install.sh --prepare|--install-platform|--initialize-n8n|--activate-modules' \
-        '       sudo sh install.sh --configure [--non-interactive [--choices-json FILE]] [--space-root DIR | --disk-layout-json FILE] [--min-free-after-bytes BYTES] [--probe-download]' \
+        '       sudo sh install.sh --configure [--locale en|ru|zh-Hans] [--non-interactive [--choices-json FILE]] [--space-root DIR | --disk-layout-json FILE] [--min-free-after-bytes BYTES] [--probe-download]' \
         'Use the complete release bundle; piping this script alone to sh is unsupported.'
 }
 
@@ -19,7 +19,7 @@ fi
 action=$1
 shift
 version=1.0.0
-non_interactive='' choices='' probe_download='' space_root='' min_free_after_bytes='' disk_layout=''
+non_interactive='' choices='' probe_download='' space_root='' min_free_after_bytes='' disk_layout='' locale=''
 case "$action" in
     --configure)
         version=1.1.0
@@ -27,6 +27,10 @@ case "$action" in
             case "$1" in
                 --non-interactive) non_interactive=--non-interactive ;;
                 --probe-download) probe_download=--probe-download ;;
+                --locale)
+                    case "${2:-}" in en|ru|zh-Hans) locale=$2 ;; *) usage >&2; exit 2 ;; esac
+                    shift
+                    ;;
                 --choices-json)
                     if [ "$#" -lt 2 ] || [ -z "$2" ]; then usage >&2; exit 2; fi
                     choices=$2
@@ -77,7 +81,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='e84cb49a6d89751429671e84ecde42b23886b9b3aecfbd261939f8a37c7e5202'
+bootstrap_sha256='c1d37bdfa481d402c9ab00ee72a5f6f5caf8124e7cdbd3e8a422538e7688b7fe'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
@@ -114,6 +118,7 @@ if [ -n "$acceptance_id" ]; then
 fi
 if [ "$action" = '--configure' ]; then
     set -- "$action" --profile "$root/var/lib/bunker-installer/$version/selection.json"
+    if [ -n "$locale" ]; then set -- "$@" "--locale=$locale"; fi
     if [ -n "$non_interactive" ]; then set -- "$@" "$non_interactive"; fi
     if [ -n "$choices" ]; then set -- "$@" "--choices-json=$choices"; fi
     if [ -n "$probe_download" ]; then set -- "$@" "$probe_download"; fi

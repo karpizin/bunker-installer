@@ -142,6 +142,19 @@ class InstallEntryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--disk-layout-json=/tmp/disk plan.json", self.log.read_text().splitlines())
 
+    def test_locale_is_only_forwarded_to_configure_and_uses_canonical_ids(self):
+        for locale in ("en", "ru", "zh-Hans"):
+            with self.subTest(locale=locale):
+                result = self.run_install("--configure", "--locale", locale)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"--locale={locale}", self.log.read_text().splitlines())
+        self.log.unlink()
+        for args in (("--configure", "--locale"), ("--configure", "--locale", "zh-Hant"),
+                     ("--configure", "--locale", "../../ru"), ("--prepare", "--locale", "ru")):
+            with self.subTest(args=args):
+                self.assertEqual(self.run_install(*args).returncode, 2)
+                self.assertFalse(self.log.exists())
+
     def test_acceptance_id_routes_all_paths_to_isolated_tree(self):
         self.env["BUNKER_ACCEPTANCE_ID"] = "release-100-rc3"
         result = self.run_install("--prepare")

@@ -234,13 +234,15 @@ def bootstrap(manifest_url: str, signature_url: str, public_key_url: str,
 def configure_product(manifest_url: str, signature_url: str, public_key_url: str, cache: Path, ops_root: Path,
                       profile: Path, *, non_interactive: bool, choices: Path | None, probe_download: bool,
                       space_root: Path | None = None, min_free_after_bytes: int = 0,
-                      disk_layout: Path | None = None) -> Path | None:
+                      disk_layout: Path | None = None, locale: str | None = None) -> Path | None:
     if choices is not None and not non_interactive:
         raise BootstrapError("choices file requires non-interactive configuration")
     if type(min_free_after_bytes) is not int or min_free_after_bytes < 0:
         raise BootstrapError("post-install free-space floor must be a nonnegative integer")
     if space_root is not None and disk_layout is not None:
         raise BootstrapError("space root and disk layout cannot be combined")
+    if locale is not None and locale not in ("en", "ru", "zh-Hans"):
+        raise BootstrapError("unsupported installer locale")
     # Keep this run's signature and catalog together even when another selection runs concurrently.
     with tempfile.TemporaryDirectory(prefix="bunker-selection-trust-") as directory:
         trust = Path(directory)
@@ -254,6 +256,8 @@ def configure_product(manifest_url: str, signature_url: str, public_key_url: str
                    str(trust / "bunker-product-release-2026.pem"), "--profile", str(profile)]
         if non_interactive:
             command.append("--non-interactive")
+        if locale is not None:
+            command += ["--locale", locale]
         if choices is not None:
             command += ["--choices-json", str(choices)]
         if probe_download:
@@ -347,6 +351,8 @@ def main() -> int:
     action.add_argument("--configure", action="store_true", help="save the choices from the signed 1.1 catalog; do not install")
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--non-interactive", action="store_true")
+    parser.add_argument("--locale", choices=("en", "ru", "zh-Hans"),
+                        help="setup language only (default: en)")
     parser.add_argument("--choices-json", type=Path)
     parser.add_argument("--probe-download", action="store_true")
     parser.add_argument("--space-root", type=Path)
@@ -364,7 +370,7 @@ def main() -> int:
                                        args.ops_root, args.profile, non_interactive=args.non_interactive,
                                        choices=args.choices_json, probe_download=args.probe_download,
                                        space_root=args.space_root,
-                                       disk_layout=args.disk_layout_json,
+                                       disk_layout=args.disk_layout_json, locale=args.locale,
                                        min_free_after_bytes=0 if args.min_free_after_bytes is None else args.min_free_after_bytes)
         except (BootstrapError, OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
             print(f"Bunker AI bootstrap: {error}", file=sys.stderr)
@@ -374,7 +380,7 @@ def main() -> int:
             result["ops_source"] = str(target)
         print(json.dumps(result))
         return 0
-    if (args.profile or args.non_interactive or args.choices_json or args.probe_download or args.space_root
+    if (args.profile or args.non_interactive or args.choices_json or args.probe_download or args.space_root or args.locale
             or args.min_free_after_bytes is not None or args.disk_layout_json is not None):
         parser.error("selection options require --configure")
     if args.source_root is None or args.install_root is None:
