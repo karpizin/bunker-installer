@@ -76,8 +76,9 @@ class BootstrapTests(unittest.TestCase):
     def download(self, url, destination, *, resume):
         shutil.copyfile(self.urls[url], destination)
 
-    def local_geo_fixture(self):
-        script = b"""import json, sys
+    def local_geo_fixture(self, script_name="product-geo-service.py", script=None):
+        if script is None:
+            script = b"""import json, sys
 from pathlib import Path
 action = sys.argv[1]
 opts = dict(zip(sys.argv[2::2], sys.argv[3::2]))
@@ -88,7 +89,7 @@ assert manifest["platform_release"]["version"] == "1.1.0"
 Path(opts["--profile"]).write_text(action)
 """
         with tarfile.open(self.archive, "w:gz") as package:
-            for name, payload in (("VERSION", b"0.2.25\n"), ("scripts/install/product-geo-service.py", script)):
+            for name, payload in (("VERSION", b"0.2.25\n"), ("scripts/install/" + script_name, script)):
                 entry = tarfile.TarInfo("bunker-ops-0.2.25/" + name)
                 entry.size = len(payload)
                 package.addfile(entry, io.BytesIO(payload))
@@ -110,6 +111,69 @@ Path(opts["--profile"]).write_text(action)
         archive.parent.mkdir(parents=True)
         shutil.copyfile(self.archive, archive)
         return trust, archive
+
+    def test_prepare_profile_bootstraps_only_the_verified_11_preparer(self):
+        trust, _ = self.local_geo_fixture("product-11-prepare.py", b"""import json, sys
+from pathlib import Path
+opts = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+assert Path(opts["--signature"]).is_file()
+assert Path(opts["--public-key"]).is_file()
+assert json.loads(Path(opts["--manifest"]).read_bytes())["platform_release"]["version"] == "1.1.0"
+assert Path(opts["--profile"]).read_text() == "saved profile"
+assert Path(opts["--source-root"]) == Path(__file__).parents[2]
+assert int(opts["--min-free-after-bytes"]) == 80 * 1024**3
+Path(opts["--profile"]).with_name("preparation-invoked").write_text(json.dumps(opts))
+""")
+        self.urls[self.arguments[0]] = trust / "release-1.1.0.json"
+        self.urls[self.arguments[1]] = trust / "release-1.1.0.sig"
+        acceptance = self.root / "release-110-test"
+        cache = acceptance / "var/cache/bunker-ai/1.1.0"
+        ops = acceptance / "opt/bunker/selection-releases"
+        profile = acceptance / "var/lib/bunker-installer/1.1.0/selection.json"
+        profile.parent.mkdir(parents=True)
+        profile.write_text("saved profile")
+        marker = profile.with_name("preparation-invoked")
+        with patch.object(bootstrap, "ACCEPTANCE_HOME", self.root), \
+                patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \
+                patch.object(bootstrap, "curl", side_effect=self.download) as download:
+            bootstrap.prepare_profile(*self.arguments[:3], cache, ops, acceptance.name)
+            opts = json.loads(marker.read_text())
+            self.assertEqual(Path(opts["--cache-root"]), acceptance / "var/cache/bunker-selected")
+            self.assertEqual(Path(opts["--geo-content-root"]), acceptance / "var/lib/bunker-profile/geography")
+            self.assertEqual(Path(opts["--model-root"]), acceptance / "var/lib/bunker-profile/models")
+            self.assertEqual(Path(opts["--runtime-staging-root"]), acceptance / "var/lib/bunker-profile/runtime")
+            self.assertFalse(Path(opts["--manifest"]).exists())
+            self.assertEqual(profile.read_text(), "saved profile")
+            marker.unlink()
+            download.reset_mock()
+            (trust / "release-1.1.0.json").write_bytes(b"tampered")
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "signature verification failed"):
+                bootstrap.prepare_profile(*self.arguments[:3], cache, ops, acceptance.name)
+            self.assertEqual(download.call_count, 3)
+            self.assertFalse(marker.exists())
+
+    def test_prepare_profile_refuses_missing_linked_or_legacy_paths_before_download(self):
+        acceptance = self.root / "release-110-test"
+        cache = acceptance / "var/cache/bunker-ai/1.1.0"
+        ops = acceptance / "opt/bunker/selection-releases"
+        with patch.object(bootstrap, "ACCEPTANCE_HOME", self.root), patch.object(bootstrap, "bootstrap") as start:
+            for identifier, target_cache, reason in (
+                ("release-100-rc22", cache, "separate"),
+                (acceptance.name, self.root / "other-cache", "acceptance root"),
+                (acceptance.name, cache, "no saved profile"),
+            ):
+                with self.subTest(identifier=identifier, reason=reason), self.assertRaisesRegex(
+                        bootstrap.BootstrapError, reason):
+                    bootstrap.prepare_profile(*self.arguments[:3], target_cache, ops, identifier)
+            acceptance.mkdir(mode=0o700)
+            acceptance.chmod(0o777)
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "owned and protected"):
+                bootstrap.prepare_profile(*self.arguments[:3], cache, ops, acceptance.name)
+            acceptance.rmdir()
+            acceptance.symlink_to(self.published, target_is_directory=True)
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "symbolic links"):
+                bootstrap.prepare_profile(*self.arguments[:3], cache, ops, acceptance.name)
+            start.assert_not_called()
 
     def test_managed_geo_dispatches_each_step_offline_from_signed_source(self):
         trust, _archive = self.local_geo_fixture()

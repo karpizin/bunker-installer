@@ -142,6 +142,27 @@ class InstallEntryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--disk-layout-json=/tmp/disk plan.json", self.log.read_text().splitlines())
 
+    def test_prepare_profile_only_accepts_isolated_11_candidate(self):
+        self.env.update(BUNKER_RELEASE_TAG="v1.1.0-rc1", BUNKER_ACCEPTANCE_ID="release-110-rc1")
+        result = self.run_install("--prepare-profile")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.log.read_text().splitlines()
+        self.assertEqual(arguments[-2:], ["--prepare-profile", "release-110-rc1"])
+        self.assertIn("https://github.com/karpizin/bunker-installer/releases/download/"
+                      "v1.1.0-rc1/release-1.1.0.json", arguments)
+        self.assertNotIn("--install-root", arguments)
+        self.log.unlink()
+        for prefix, tag, extras in (
+            ("", "v1.1.0-rc1", []),
+            ("release-100-rc22", "v1.1.0-rc1", []),
+            ("release-110-rc1", "v1.0.0-rc22", []),
+            ("release-110-rc1", "v1.1.0-rc1", ["--profile", "other.json"]),
+        ):
+            with self.subTest(prefix=prefix, tag=tag, extras=extras):
+                self.env.update(BUNKER_ACCEPTANCE_ID=prefix, BUNKER_RELEASE_TAG=tag)
+                self.assertEqual(self.run_install("--prepare-profile", *extras).returncode, 2)
+                self.assertFalse(self.log.exists())
+
     def test_geo_uses_local_11_cache_and_preserves_argument_boundaries(self):
         self.env.update(BUNKER_ACCEPTANCE_ID="release-110-geo")
         result = self.run_install("--geo", "recover", "/tmp/release trust", "--", "--profile", "/tmp/my profile")

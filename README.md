@@ -60,6 +60,16 @@ installation: first preserve its recovery evidence, stop it in a controlled
 maintenance window, and verify rollback. A successful `--prepare` alone is
 not acceptance of activation.
 
+## Candidate profile preparation (1.1 development only)
+
+After a signed 1.1 candidate is staged, use the same `BUNKER_RELEASE_TAG` and
+`BUNKER_ACCEPTANCE_ID=release-110-rcN` for `--configure` and `--prepare-profile`.
+The latter verifies the signed release again and passes the saved profile and
+private staging directories to the Ops preparer. It preserves an 80 GiB
+free-space floor and does not start the platform, index Wikipedia, or activate
+models or maps. Use the preparer's `activated: false` report as staging evidence
+only. A different candidate requires its own manifest-bound selection.
+
 ## Managed geography (1.1 development only)
 
 The development bundle accepts `--geo activate|recover|restart TRUST_DIR -- [Geo options]`.

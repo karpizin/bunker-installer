@@ -22,6 +22,7 @@ PRODUCT_KEY_FINGERPRINT = "1e7ad26b66b4f5eab9e60f9ae630b3f57f59fd19fe8c33dfadf32
 MAX_OPS_BYTES = 1024 * 1024 * 1024
 RELEASE_SCHEMAS = {"1.0.0": "bunker.appliance-release/v1", "1.1.0": "bunker.appliance-release/v2"}
 CONFIGURE_CANCELLED = 3
+ACCEPTANCE_HOME = Path("/var/lib/bunker-acceptance")
 
 
 class BootstrapError(RuntimeError):
@@ -293,6 +294,52 @@ def prepare_product(target: Path, cache: Path, ops_root: Path,
     ], check=True)
 
 
+def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
+                    cache: Path, ops_root: Path, acceptance_id: str) -> None:
+    if not re.fullmatch(r"release-110-[A-Za-z0-9][A-Za-z0-9._-]{0,51}", acceptance_id):
+        raise BootstrapError("profile preparation requires a separate release-110-* acceptance ID")
+    root = ACCEPTANCE_HOME / acceptance_id
+    if cache != root / "var/cache/bunker-ai/1.1.0" or ops_root != root / "opt/bunker/selection-releases":
+        raise BootstrapError("profile preparation paths must belong to the selected acceptance root")
+    profile = root / "var/lib/bunker-installer/1.1.0/selection.json"
+    staging = root / "var/lib/bunker-profile"
+    destinations = {
+        "cache-root": root / "var/cache/bunker-selected",
+        "model-root": staging / "models",
+        "runtime-staging-root": staging / "runtime",
+        "geo-content-root": staging / "geography",
+    }
+    for path in (cache, ops_root, profile, *destinations.values()):
+        for part in (path, *path.parents):
+            try:
+                info = part.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                raise BootstrapError("profile preparation paths must not traverse symbolic links")
+            if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                raise BootstrapError("profile preparation paths must be owned and protected")
+            if part == ACCEPTANCE_HOME:
+                break
+    if not profile.is_file():
+        raise BootstrapError("no saved profile in this acceptance root; run --configure first")
+
+    with tempfile.TemporaryDirectory(prefix="bunker-profile-trust-") as directory:
+        trust = Path(directory)
+        target = bootstrap(manifest_url, signature_url, public_key_url, cache, ops_root,
+                           release_version="1.1.0", private_trust=trust)
+        script = target / "scripts/install/product-11-prepare.py"
+        if not script.is_file() or script.is_symlink():
+            raise BootstrapError("verified Ops source lacks the 1.1 profile preparation tool")
+        command = [sys.executable, "-B", str(script), "--manifest", str(trust / "release-1.1.0.json"),
+                   "--signature", str(trust / "release-1.1.0.sig"), "--public-key",
+                   str(trust / "bunker-product-release-2026.pem"), "--profile", str(profile),
+                   "--source-root", str(target), "--min-free-after-bytes", str(80 * 1024**3)]
+        for name, path in destinations.items():
+            command += ["--" + name, str(path)]
+        subprocess.run(command, check=True)
+
+
 def run_product_step(target: Path, cache: Path, ops_root: Path, source_root: Path,
                      install_root: Path, state_root: Path, step: str) -> None:
     if step not in {"install-platform", "initialize-n8n", "activate-modules"}:
@@ -403,6 +450,8 @@ def main() -> int:
     action.add_argument("--initialize-n8n", action="store_true")
     action.add_argument("--activate-modules", action="store_true")
     action.add_argument("--configure", action="store_true", help="save the choices from the signed 1.1 catalog; do not install")
+    action.add_argument("--prepare-profile", metavar="ACCEPTANCE_ID",
+                        help="stage a saved 1.1 profile under its acceptance root; do not activate")
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--non-interactive", action="store_true")
     parser.add_argument("--locale", choices=("en", "ru", "zh-Hans"),
@@ -437,6 +486,16 @@ def main() -> int:
     if (args.profile or args.non_interactive or args.choices_json or args.probe_download or args.space_root or args.locale
             or args.min_free_after_bytes is not None or args.disk_layout_json is not None):
         parser.error("selection options require --configure")
+    if args.prepare_profile is not None:
+        if any(path is not None for path in (args.source_root, args.install_root, args.state_root)):
+            parser.error("profile preparation does not take explicit service or install roots")
+        try:
+            prepare_profile(args.manifest_url, args.signature_url, args.public_key_url,
+                            args.cache, args.ops_root, args.prepare_profile)
+        except (BootstrapError, OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
+            print(f"Bunker AI bootstrap: {error}", file=sys.stderr)
+            return 1
+        return 0
     if args.source_root is None or args.install_root is None:
         parser.error("product operation requires --source-root and --install-root")
     if not args.prepare and args.state_root is None:

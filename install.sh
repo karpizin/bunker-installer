@@ -5,6 +5,7 @@ set -eu
 usage() {
     printf '%s\n' 'Usage: sudo sh install.sh --prepare|--install-platform|--initialize-n8n|--activate-modules' \
         '       sudo sh install.sh --configure [--locale en|ru|zh-Hans] [--non-interactive [--choices-json FILE]] [--space-root DIR | --disk-layout-json FILE] [--min-free-after-bytes BYTES] [--probe-download]' \
+        '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --prepare-profile' \
         '       sudo sh install.sh --geo activate|recover|restart TRUST_DIR -- [managed Geo options]' \
         'Use the complete release bundle; piping this script alone to sh is unsupported.'
 }
@@ -67,6 +68,10 @@ case "$action" in
         if [ -n "$choices" ] && [ -z "$non_interactive" ]; then usage >&2; exit 2; fi
         if [ -n "$space_root" ] && [ -n "$disk_layout" ]; then usage >&2; exit 2; fi
         ;;
+    --prepare-profile)
+        if [ "$#" -ne 0 ]; then usage >&2; exit 2; fi
+        version=1.1.0
+        ;;
     --prepare|--install-platform|--initialize-n8n|--activate-modules)
         if [ "$#" -ne 0 ]; then usage >&2; exit 2; fi
         ;;
@@ -89,7 +94,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='961134a841d7ab8632abe297ee466afcc06459df94ef3acdc0018651759b9670'
+bootstrap_sha256='2f481f9ccaa6b2fbc131d105795cc4de15db84db820ec99eca588cf799f3c869'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
@@ -142,6 +147,13 @@ if [ "$action" = '--configure' ]; then
     if [ -n "$space_root" ]; then set -- "$@" "--space-root=$space_root"; fi
     if [ -n "$disk_layout" ]; then set -- "$@" "--disk-layout-json=$disk_layout"; fi
     if [ -n "$min_free_after_bytes" ]; then set -- "$@" "--min-free-after-bytes=$min_free_after_bytes"; fi
+    ops_root="$root/opt/bunker/selection-releases"
+elif [ "$action" = '--prepare-profile' ]; then
+    if ! printf '%s\n' "$acceptance_id" | grep -Eq '^release-110-[A-Za-z0-9][A-Za-z0-9._-]{0,51}$'; then
+        printf '%s\n' 'Profile preparation requires a separate release-110-* acceptance ID.' >&2
+        exit 2
+    fi
+    set -- "$action" "$acceptance_id"
     ops_root="$root/opt/bunker/selection-releases"
 else
     set -- --source-root "$root/opt/bunker/module-sources" \
