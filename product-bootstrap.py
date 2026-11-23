@@ -22,7 +22,7 @@ PRODUCT_KEY_FINGERPRINT = "1e7ad26b66b4f5eab9e60f9ae630b3f57f59fd19fe8c33dfadf32
 MAX_OPS_BYTES = 1024 * 1024 * 1024
 RELEASE_SCHEMAS = {"1.0.0": "bunker.appliance-release/v1", "1.1.0": "bunker.appliance-release/v2"}
 CONFIGURE_CANCELLED = 3
-ACCEPTANCE_HOME = Path("/var/lib/bunker-acceptance")
+ACCEPTANCE_HOME = Path("/var/lib/bunker-acceptance-11")
 PROFILE_ID = re.compile(r"[0-9a-f]{64}")
 TRUST_FILES = ("release-1.1.0.json", "release-1.1.0.sig", "bunker-product-release-2026.pem")
 
@@ -246,6 +246,15 @@ def configure_product(manifest_url: str, signature_url: str, public_key_url: str
         raise BootstrapError("space root and disk layout cannot be combined")
     if locale is not None and locale not in ("en", "ru", "zh-Hans"):
         raise BootstrapError("unsupported installer locale")
+    if any(path.is_relative_to(ACCEPTANCE_HOME) for path in (cache, ops_root, profile)):
+        try:
+            identifier = cache.relative_to(ACCEPTANCE_HOME).parts[0]
+        except (ValueError, IndexError):
+            raise BootstrapError("selection paths must share the dedicated 1.1 acceptance root") from None
+        root = acceptance_profile_root(cache, ops_root, identifier)
+        if profile != root / "var/lib/bunker-installer/1.1.0/selection.json":
+            raise BootstrapError("selection profile must stay in the dedicated 1.1 acceptance root")
+        check_profile_paths(cache, ops_root, profile)
     # Keep this run's signature and catalog together even when another selection runs concurrently.
     with tempfile.TemporaryDirectory(prefix="bunker-selection-trust-") as directory:
         trust = Path(directory)
@@ -297,7 +306,7 @@ def prepare_product(target: Path, cache: Path, ops_root: Path,
 
 
 def acceptance_profile_root(cache: Path, ops_root: Path, acceptance_id: str) -> Path:
-    if not re.fullmatch(r"release-110-[A-Za-z0-9][A-Za-z0-9._-]{0,51}", acceptance_id):
+    if not re.fullmatch(r"release-110-[a-z0-9][a-z0-9-]{0,51}", acceptance_id):
         raise BootstrapError("profile preparation requires a separate release-110-* acceptance ID")
     root = ACCEPTANCE_HOME / acceptance_id
     if cache != root / "var/cache/bunker-ai/1.1.0" or ops_root != root / "opt/bunker/selection-releases":
@@ -536,8 +545,11 @@ def geo_entry(argv: list[str]) -> int:
 
 def run_prepared_wikipedia(action: str, profile_id: str, rollback_id: str | None, cache: Path,
                            ops_root: Path, acceptance_id: str) -> None:
-    if action not in {"activate", "recover"} or not re.fullmatch(r"release-110-[a-z0-9][a-z0-9-]{0,51}", acceptance_id):
+    if (action not in {"activate", "recover", "setup-index", "start-voice"}
+            or not re.fullmatch(r"release-110-[a-z0-9][a-z0-9-]{0,51}", acceptance_id)):
         raise BootstrapError("managed Wikipedia requires a lowercase release-110-* acceptance ID and a valid action")
+    if action in {"setup-index", "start-voice"} and rollback_id is not None:
+        raise BootstrapError("index or voice setup does not accept a rollback profile")
     root = acceptance_profile_root(cache, ops_root, acceptance_id)
     bundle = prepared_profile_files(root, profile_id)
     if rollback_id is not None:
@@ -565,7 +577,7 @@ def run_prepared_wikipedia(action: str, profile_id: str, rollback_id: str | None
 
 def wikipedia_entry(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="product-bootstrap.py --wikipedia", allow_abbrev=False)
-    parser.add_argument("action", choices=("activate", "recover"))
+    parser.add_argument("action", choices=("activate", "recover", "setup-index", "start-voice"))
     parser.add_argument("--acceptance-id", required=True)
     parser.add_argument("--prepared-profile", required=True)
     parser.add_argument("--rollback-prepared")

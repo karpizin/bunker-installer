@@ -244,7 +244,8 @@ Path(options['--env-file']).write_text(json.dumps({
     def test_wikipedia_bootstrap_verifies_local_ops_and_prepared_profiles_without_network(self):
         trust, _ = self.local_geo_fixture(
             "product-11-prepare.py", b'print(\'{"ok": true, "activated": false, "platform_inputs": {"transport_only": true}}\')\n',
-            extra_scripts=[("scripts/install/product-11-wikipedia.py", b'import sys; assert sys.argv[1] in ("activate", "recover")\n')])
+            extra_scripts=[("scripts/install/product-11-wikipedia.py",
+                            b'import sys; assert sys.argv[1] in ("activate", "recover", "setup-index", "start-voice")\n')])
         self.urls[self.arguments[0]] = trust / "release-1.1.0.json"
         self.urls[self.arguments[1]] = trust / "release-1.1.0.sig"
         acceptance = self.root / "release-110-rc1"
@@ -265,6 +266,10 @@ Path(options['--env-file']).write_text(json.dumps({
                 ids.append(json.loads(output.getvalue())["prepared_profile_id"])
             network.reset_mock()
             bootstrap.run_prepared_wikipedia("activate", ids[0], None, cache, ops, acceptance.name)
+            bootstrap.run_prepared_wikipedia("setup-index", ids[0], None, cache, ops, acceptance.name)
+            bootstrap.run_prepared_wikipedia("start-voice", ids[0], None, cache, ops, acceptance.name)
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "does not accept a rollback"):
+                bootstrap.run_prepared_wikipedia("setup-index", ids[0], ids[1], cache, ops, acceptance.name)
             bootstrap.run_prepared_wikipedia("recover", ids[1], ids[0], cache, ops, acceptance.name)
             with self.assertRaisesRegex(bootstrap.BootstrapError, "different prepared"):
                 bootstrap.run_prepared_wikipedia("recover", ids[1], ids[1], cache, ops, acceptance.name)

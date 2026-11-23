@@ -105,15 +105,15 @@ class InstallEntryTests(unittest.TestCase):
                 self.assertFalse(self.log.exists())
 
     def test_configure_uses_isolated_11_catalog_and_passes_choices_as_data(self):
-        self.env.update(BUNKER_RELEASE_TAG="v1.1.0-rc1", BUNKER_ACCEPTANCE_ID="release-11")
+        self.env.update(BUNKER_RELEASE_TAG="v1.1.0-rc1", BUNKER_ACCEPTANCE_ID="release-110-rc1")
         result = self.run_install("--configure", "--non-interactive", "--choices-json", "/tmp/with spaces.json",
                                   "--space-root", "/mnt/target volume", "--min-free-after-bytes", "85899345920")
         self.assertEqual(result.returncode, 0, result.stderr)
         arguments = self.log.read_text().splitlines()
         self.assertIn("https://github.com/karpizin/bunker-installer/releases/download/"
                       "v1.1.0-rc1/release-1.1.0.json", arguments)
-        self.assertIn("/var/lib/bunker-acceptance/release-11/opt/bunker/selection-releases", arguments)
-        self.assertIn("/var/lib/bunker-acceptance/release-11/var/lib/bunker-installer/1.1.0/selection.json", arguments)
+        self.assertIn("/var/lib/bunker-acceptance-11/release-110-rc1/opt/bunker/selection-releases", arguments)
+        self.assertIn("/var/lib/bunker-acceptance-11/release-110-rc1/var/lib/bunker-installer/1.1.0/selection.json", arguments)
         self.assertIn("--choices-json=/tmp/with spaces.json", arguments)
         self.assertIn("--space-root=/mnt/target volume", arguments)
         self.assertIn("--min-free-after-bytes=85899345920", arguments)
@@ -168,7 +168,7 @@ class InstallEntryTests(unittest.TestCase):
         result = self.run_install("--geo", "recover", "/tmp/release trust", "--", "--profile", "/tmp/my profile")
         self.assertEqual(result.returncode, 0, result.stderr)
         opts = self.log.read_text().splitlines()[1:]
-        root = "/var/lib/bunker-acceptance/release-110-geo"
+        root = "/var/lib/bunker-acceptance-11/release-110-geo"
         self.assertEqual(opts, ["--geo", "recover", "--ops-cache", root + "/var/cache/bunker-ai/1.1.0",
                                 "--ops-root", root + "/opt/bunker/selection-releases",
                                 "--trust-dir", "/tmp/release trust", "--", "--profile", "/tmp/my profile"])
@@ -178,7 +178,7 @@ class InstallEntryTests(unittest.TestCase):
         result = self.run_install("--wikipedia", "recover", "a" * 64, "b" * 64)
         self.assertEqual(result.returncode, 0, result.stderr)
         opts = self.log.read_text().splitlines()[1:]
-        root = "/var/lib/bunker-acceptance/release-110-rc1"
+        root = "/var/lib/bunker-acceptance-11/release-110-rc1"
         self.assertEqual(opts, ["--wikipedia", "recover", "--acceptance-id", "release-110-rc1",
                                 "--ops-cache", root + "/var/cache/bunker-ai/1.1.0",
                                 "--ops-root", root + "/opt/bunker/selection-releases",
@@ -187,12 +187,24 @@ class InstallEntryTests(unittest.TestCase):
         for acceptance, options in (
             ("release-110-rc1", ("activate", "/tmp/profile")),
             ("release-110-rc1", ("restart", "a" * 64)),
+            ("release-110-rc1", ("start-voice", "a" * 64, "b" * 64)),
             ("release-110-rc1", ("activate", "a" * 64, "--ops-root", "/tmp/other")),
             ("release-100-rc22", ("recover", "a" * 64)),
         ):
             self.env["BUNKER_ACCEPTANCE_ID"] = acceptance
             self.assertEqual(self.run_install("--wikipedia", *options).returncode, 2)
             self.assertFalse(self.log.exists())
+
+    def test_index_and_voice_route_through_the_prepared_signed_profile(self):
+        self.env.update(BUNKER_ACCEPTANCE_ID="release-110-rc1")
+        for action in ("setup-index", "start-voice"):
+            with self.subTest(action=action):
+                result = self.run_install("--wikipedia", action, "a" * 64)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                arguments = self.log.read_text().splitlines()
+                self.assertEqual(arguments[1:3], ["--wikipedia", action])
+                self.assertIn("/var/lib/bunker-acceptance-11/release-110-rc1/var/cache/bunker-ai/1.1.0", arguments)
+                self.assertNotIn("--rollback-prepared", arguments)
 
     def test_prepared_geo_routes_to_the_isolated_acceptance_root(self):
         identity = "a" * 64
@@ -211,7 +223,7 @@ class InstallEntryTests(unittest.TestCase):
         self.env["BUNKER_ACCEPTANCE_ID"] = "release-100-rc22"
         result = self.run_install("--geo", "activate", "/trust", "--")
         self.assertEqual(result.returncode, 2)
-        self.assertIn("separate 1.1 project", result.stderr)
+        self.assertIn("lowercase release-110-* ID", result.stderr)
         self.assertFalse(self.log.exists())
 
     def test_locale_is_only_forwarded_to_configure_and_uses_canonical_ids(self):

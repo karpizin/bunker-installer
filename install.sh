@@ -6,6 +6,7 @@ usage() {
     printf '%s\n' 'Usage: sudo sh install.sh --prepare|--install-platform|--initialize-n8n|--activate-modules' \
         '       sudo sh install.sh --configure [--locale en|ru|zh-Hans] [--non-interactive [--choices-json FILE]] [--space-root DIR | --disk-layout-json FILE] [--min-free-after-bytes BYTES] [--probe-download]' \
         '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --prepare-profile' \
+        '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --wikipedia setup-index|start-voice PROFILE_SHA256' \
         '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --wikipedia activate|recover PROFILE_SHA256 [ROLLBACK_SHA256]' \
         '       sudo sh install.sh --geo activate|recover|restart TRUST_DIR -- [managed Geo options]' \
         '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --geo activate|recover|restart prepared:PROFILE_SHA256 -- [managed Geo options]' \
@@ -27,7 +28,11 @@ non_interactive='' choices='' probe_download='' space_root='' min_free_after_byt
 case "$action" in
     --wikipedia)
         if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then usage >&2; exit 2; fi
-        case "$1" in activate|recover) ;; *) usage >&2; exit 2 ;; esac
+        case "$1" in
+            activate|recover) ;;
+            setup-index|start-voice) if [ "$#" -ne 2 ]; then usage >&2; exit 2; fi ;;
+            *) usage >&2; exit 2 ;;
+        esac
         for profile_id in "${2}" "${3:-$2}"; do
             if ! printf '%s\n' "$profile_id" | grep -Eq '^[0-9a-f]{64}$'; then usage >&2; exit 2; fi
         done
@@ -104,7 +109,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='a93e96dbda3ac711a681bb0d1fd895b5180d5219eb3c343d210a182942c15696'
+bootstrap_sha256='280261383349a252f322429db1199d859d3871594384793e85fc35b23735f672'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
@@ -137,7 +142,15 @@ if [ -n "$acceptance_id" ]; then
         printf '%s\n' 'Invalid BUNKER_ACCEPTANCE_ID; use one safe path component.' >&2
         exit 2
     fi
-    root="/var/lib/bunker-acceptance/$acceptance_id"
+    if [ "$version" = 1.1.0 ]; then
+        if ! printf '%s\n' "$acceptance_id" | grep -Eq '^release-110-[a-z0-9][a-z0-9-]{0,51}$'; then
+            printf '%s\n' '1.1 acceptance requires a lowercase release-110-* ID.' >&2
+            exit 2
+        fi
+        root="/var/lib/bunker-acceptance-11/$acceptance_id"
+    else
+        root="/var/lib/bunker-acceptance/$acceptance_id"
+    fi
 fi
 if [ "$action" = '--wikipedia' ]; then
     if ! printf '%s\n' "$acceptance_id" | grep -Eq '^release-110-[a-z0-9][a-z0-9-]{0,51}$'; then
