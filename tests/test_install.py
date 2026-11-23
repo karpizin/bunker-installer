@@ -195,9 +195,9 @@ class InstallEntryTests(unittest.TestCase):
             self.assertEqual(self.run_install("--wikipedia", *options).returncode, 2)
             self.assertFalse(self.log.exists())
 
-    def test_index_and_voice_route_through_the_prepared_signed_profile(self):
+    def test_base_setup_routes_through_the_prepared_signed_profile(self):
         self.env.update(BUNKER_ACCEPTANCE_ID="release-110-rc1")
-        for action in ("setup-index", "start-voice"):
+        for action in ("setup-index", "start-voice", "start-operator"):
             with self.subTest(action=action):
                 result = self.run_install("--wikipedia", action, "a" * 64)
                 self.assertEqual(result.returncode, 0, result.stderr)

@@ -255,6 +255,13 @@ def configure_product(manifest_url: str, signature_url: str, public_key_url: str
         if profile != root / "var/lib/bunker-installer/1.1.0/selection.json":
             raise BootstrapError("selection profile must stay in the dedicated 1.1 acceptance root")
         check_profile_paths(cache, ops_root, profile)
+        try:
+            ACCEPTANCE_HOME.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        else:
+            # Dedicated service users need traversal without permission to list other candidates.
+            ACCEPTANCE_HOME.chmod(0o751)
     # Keep this run's signature and catalog together even when another selection runs concurrently.
     with tempfile.TemporaryDirectory(prefix="bunker-selection-trust-") as directory:
         trust = Path(directory)
@@ -545,11 +552,11 @@ def geo_entry(argv: list[str]) -> int:
 
 def run_prepared_wikipedia(action: str, profile_id: str, rollback_id: str | None, cache: Path,
                            ops_root: Path, acceptance_id: str) -> None:
-    if (action not in {"activate", "recover", "setup-index", "start-voice"}
+    if (action not in {"activate", "recover", "setup-index", "start-voice", "start-operator"}
             or not re.fullmatch(r"release-110-[a-z0-9][a-z0-9-]{0,51}", acceptance_id)):
         raise BootstrapError("managed Wikipedia requires a lowercase release-110-* acceptance ID and a valid action")
-    if action in {"setup-index", "start-voice"} and rollback_id is not None:
-        raise BootstrapError("index or voice setup does not accept a rollback profile")
+    if action in {"setup-index", "start-voice", "start-operator"} and rollback_id is not None:
+        raise BootstrapError("base setup does not accept a rollback profile")
     root = acceptance_profile_root(cache, ops_root, acceptance_id)
     bundle = prepared_profile_files(root, profile_id)
     if rollback_id is not None:
@@ -577,7 +584,7 @@ def run_prepared_wikipedia(action: str, profile_id: str, rollback_id: str | None
 
 def wikipedia_entry(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="product-bootstrap.py --wikipedia", allow_abbrev=False)
-    parser.add_argument("action", choices=("activate", "recover", "setup-index", "start-voice"))
+    parser.add_argument("action", choices=("activate", "recover", "setup-index", "start-voice", "start-operator"))
     parser.add_argument("--acceptance-id", required=True)
     parser.add_argument("--prepared-profile", required=True)
     parser.add_argument("--rollback-prepared")
