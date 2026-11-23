@@ -189,6 +189,17 @@ class InstallEntryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--media-root=/tmp/local media", self.log.read_text().splitlines())
 
+    def test_sealed_kit_profile_digest_requires_offline_media(self):
+        self.env.update(BUNKER_ACCEPTANCE_ID="release-110-kit", BUNKER_RELEASE_TAG="v1.1.0-rc1")
+        for options in (("--offline", "--kit-profile-sha256", "b" * 64),
+                        ("--offline", "--media-root", "/tmp/media", "--kit-profile-sha256", "wrong")):
+            self.assertEqual(self.run_install("--prepare-profile", *options).returncode, 2)
+            self.assertFalse(self.log.exists())
+        result = self.run_install("--prepare-profile", "--offline", "--media-root", "/tmp/local media",
+                                  "--kit-profile-sha256", "b" * 64)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--kit-profile-sha256=" + "b" * 64, self.log.read_text().splitlines())
+
     def test_wikipedia_passes_only_prepared_profile_ids_for_the_candidate(self):
         self.env.update(BUNKER_ACCEPTANCE_ID="release-110-rc1")
         result = self.run_install("--wikipedia", "recover", "a" * 64, "b" * 64)

@@ -27,6 +27,7 @@ PROFILE_ID = re.compile(r"[0-9a-f]{64}")
 TRUST_FILES = ("release-1.1.0.json", "release-1.1.0.sig", "bunker-product-release-2026.pem")
 OFFLINE_TRUST_LIMITS = (2 << 20, 64 << 10, 64 << 10)
 PROFILE_FREE_FLOOR = 80 << 30
+KIT_MANIFEST = "kit-manifest.json"
 
 
 class BootstrapError(RuntimeError):
@@ -341,6 +342,8 @@ def check_profile_paths(*paths: Path) -> None:
             try:
                 info = part.lstat()
             except FileNotFoundError:
+                if part == ACCEPTANCE_HOME:
+                    break
                 continue
             if stat.S_ISLNK(info.st_mode):
                 raise BootstrapError("profile preparation paths must not traverse symbolic links")
@@ -348,6 +351,19 @@ def check_profile_paths(*paths: Path) -> None:
                 raise BootstrapError("profile preparation paths must be owned and protected")
             if part == ACCEPTANCE_HOME:
                 break
+
+
+def read_offline_metadata(path: Path, limit: int) -> bytes:
+    if path.resolve() != path or not path.is_file():
+        raise BootstrapError(f"offline metadata is missing or linked: {path.name}")
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= limit:
+            raise BootstrapError(f"offline metadata exceeds its size limit or is not a regular file: {path.name}")
+        data = stream.read(limit + 1)
+    if len(data) != info.st_size:
+        raise BootstrapError(f"offline metadata size changed while reading: {path.name}")
+    return data
 
 
 def prepared_profile_files(root: Path, profile_id: str) -> Path:
@@ -422,14 +438,7 @@ def offline_profile_source(manifest_url: str, cache: Path, trust: Path, ops_root
     if not all(path.resolve() == path and path.is_file() for path in cached):
         raise BootstrapError("offline staging requires the signed 1.1 release files in local trust")
     for source, limit in zip(cached, OFFLINE_TRUST_LIMITS):
-        with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= limit:
-                raise BootstrapError("offline trust file exceeds its size limit or is not a regular file")
-            payload = stream.read(limit + 1)
-        if len(payload) != info.st_size:
-            raise BootstrapError("offline trust file size changed while reading")
-        (trust / source.name).write_bytes(payload)
+        (trust / source.name).write_bytes(read_offline_metadata(source, limit))
     manifest, signature, key = (trust / name for name in TRUST_FILES)
     verify_signature(manifest, signature, key)
     pin = ops_pin(manifest, "1.1.0")
@@ -444,9 +453,42 @@ def offline_profile_source(manifest_url: str, cache: Path, trust: Path, ops_root
     return stage_ops(archive, pin, ops_root)
 
 
+def verified_kit(target: Path, media_root: Path, scope: str, profile_sha: str) -> str:
+    script = target / "scripts/release/verify-11-offline-kit.py"
+    if not script.is_file() or script.is_symlink():
+        raise BootstrapError("verified Ops source lacks the 1.1 signed kit verifier")
+    raw = read_offline_metadata(media_root / KIT_MANIFEST, 2 << 20)
+    expected = hashlib.sha256(raw).hexdigest()
+    check = [sys.executable, "-B", str(script), "verify", "--media-root", str(media_root),
+             "--scope", scope, "--profile-sha256", profile_sha]
+    result = json.loads(subprocess.check_output(check, text=True))
+    if (not isinstance(result, dict) or result.get("signed") is not True or result.get("installed") is not False
+            or result.get("scope") != scope or result.get("manifest_sha256") != expected):
+        raise BootstrapError("verified Ops did not confirm the exact signed kit")
+    return expected
+
+
+def save_imported_profile(profile: Path, raw: bytes) -> None:
+    check_profile_paths(profile)
+    profile.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".offline-selection-", dir=profile.parent) as directory:
+        copy = Path(directory) / profile.name
+        with copy.open("xb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(copy, profile, follow_symlinks=False)
+        except FileExistsError:
+            check_profile_paths(profile)
+            if read_offline_metadata(profile, 1 << 20) != raw:
+                raise BootstrapError("offline kit must not replace an existing saved profile") from None
+
+
 def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
                     cache: Path, ops_root: Path, acceptance_id: str, *, offline: bool = False,
-                    media_root: Path | None = None) -> None:
+                    media_root: Path | None = None, kit_profile_sha256: str | None = None) -> None:
     root = acceptance_profile_root(cache, ops_root, acceptance_id)
     if media_root is not None and (not offline or not media_root.is_absolute() or media_root == Path("/")
                                    or media_root.resolve() != media_root or not media_root.is_dir()
@@ -455,8 +497,34 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
     profile = root / "var/lib/bunker-installer/1.1.0/selection.json"
     common = profile_destinations(root, include_geo=False)
     check_profile_paths(cache, ops_root, profile, root / "var/lib/bunker-profile/prepared", *common.values())
-    if not profile.is_file():
+    if kit_profile_sha256 is not None and (media_root is None or not offline or not PROFILE_ID.fullmatch(kit_profile_sha256)):
+        raise BootstrapError("a reviewed kit profile SHA-256 requires --offline and a separate media root")
+    if kit_profile_sha256 is not None:
+        profile_raw = read_offline_metadata(media_root / "selection.json", 1 << 20)
+        if hashlib.sha256(profile_raw).hexdigest() != kit_profile_sha256:
+            raise BootstrapError("kit selection does not match the reviewed profile SHA-256")
+        if os.path.lexists(profile):
+            if read_offline_metadata(profile, 1 << 20) != profile_raw:
+                raise BootstrapError("offline kit must not replace an existing saved profile")
+        else:
+            for name in ("platform.env", "amd395-full.env"):
+                if os.path.lexists(root / "var/lib/bunker-platform/config" / name):
+                    raise BootstrapError("offline kit must not adopt an existing platform without its saved profile")
+        parent = ACCEPTANCE_HOME.parent
+        parent_info = parent.lstat()
+        if (parent.resolve() != parent or not stat.S_ISDIR(parent_info.st_mode)
+                or parent_info.st_uid != os.geteuid() or parent_info.st_mode & 0o022):
+            raise BootstrapError("offline acceptance parent must be owned and protected")
+        try:
+            ACCEPTANCE_HOME.mkdir(mode=0o751)
+        except FileExistsError:
+            pass
+        else:
+            ACCEPTANCE_HOME.chmod(0o751)
+    elif not profile.is_file():
         raise BootstrapError("no saved profile in this acceptance root; run --configure first")
+    else:
+        profile_raw = profile.read_bytes()
 
     with tempfile.TemporaryDirectory(prefix="bunker-profile-trust-") as directory:
         trust = Path(directory)
@@ -466,7 +534,7 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
             target = bootstrap(manifest_url, signature_url, public_key_url, cache, ops_root,
                                release_version="1.1.0", private_trust=trust)
         snapshot = trust / "selection.json"
-        snapshot.write_bytes(profile.read_bytes())
+        snapshot.write_bytes(profile_raw)
         snapshot.chmod(0o400)
         saved = json.loads(snapshot.read_bytes())
         if not isinstance(saved, dict) or saved.get("release_manifest_sha256") != sha256(trust / TRUST_FILES[0]):
@@ -484,6 +552,11 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
         if "geo-content-root" in destinations:
             check_profile_paths(destinations["geo-content-root"])
         profile_id = sha256(snapshot)
+        kit_manifest_sha = None
+        if kit_profile_sha256 is not None:
+            if scope not in ("base", "full"):
+                raise BootstrapError("a signed kit requires an explicit Basic or Full selection")
+            kit_manifest_sha = verified_kit(target, media_root, scope, profile_id)
         script = target / "scripts/install/product-11-prepare.py"
         if not script.is_file() or script.is_symlink():
             raise BootstrapError("verified Ops source lacks the 1.1 profile preparation tool")
@@ -508,6 +581,9 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
             raise BootstrapError("verified Ops preparer did not stage the base platform inputs")
         if scoped and (("geo_inputs" in result) != (scope == "full")):
             raise BootstrapError("verified Ops preparation does not match the selected delivery scope")
+        if kit_manifest_sha is not None:
+            save_imported_profile(profile, profile_raw)
+            result["verified_kit_manifest_sha256"] = kit_manifest_sha
         save_prepared_profile(root, trust, profile_id)
         print(json.dumps({**result, "prepared_profile_id": profile_id}, sort_keys=True))
 
@@ -725,6 +801,7 @@ def main() -> int:
     parser.add_argument("--probe-download", action="store_true")
     parser.add_argument("--offline", action="store_true", help="use only verified local caches for --prepare-profile")
     parser.add_argument("--media-root", type=Path, help="read local media when preparing offline")
+    parser.add_argument("--kit-profile-sha256", help="verify a signed kit and replay this exact saved profile")
     parser.add_argument("--space-root", type=Path)
     parser.add_argument("--disk-layout-json", type=Path)
     parser.add_argument("--min-free-after-bytes", type=int)
@@ -736,6 +813,8 @@ def main() -> int:
         parser.error("--offline requires --prepare-profile")
     if args.media_root is not None and not args.offline:
         parser.error("--media-root requires --prepare-profile --offline")
+    if args.kit_profile_sha256 is not None and args.media_root is None:
+        parser.error("--kit-profile-sha256 requires --prepare-profile --offline --media-root")
     if args.configure:
         if args.profile is None or (args.choices_json is not None and not args.non_interactive):
             parser.error("--configure requires --profile; --choices-json requires --non-interactive")
@@ -763,7 +842,8 @@ def main() -> int:
         try:
             prepare_profile(args.manifest_url, args.signature_url, args.public_key_url,
                             args.cache, args.ops_root, args.prepare_profile,
-                            offline=args.offline, media_root=args.media_root)
+                            offline=args.offline, media_root=args.media_root,
+                            kit_profile_sha256=args.kit_profile_sha256)
         except (BootstrapError, OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
             print(f"Bunker AI bootstrap: {error}", file=sys.stderr)
             return 1

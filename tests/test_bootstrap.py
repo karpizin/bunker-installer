@@ -8,7 +8,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -334,7 +334,7 @@ print(json.dumps(result))
                 bootstrap.prepare_profile(url.replace("-rc1/", "-rc2/"), "", "", cache, ops, root.name, offline=True)
             cached_signature = cache / "trust" / signature.name
             cached_signature.write_bytes(b"x" * ((64 << 10) + 1))
-            with self.assertRaisesRegex(bootstrap.BootstrapError, "trust file exceeds its size limit"):
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "metadata exceeds its size limit"):
                 bootstrap.prepare_profile(url, "", "", cache, ops, root.name, offline=True)
             shutil.copyfile(signature, cached_signature)
             cached_archive.write_bytes(b"bad ops archive")
@@ -366,6 +366,105 @@ print(json.dumps(result))
             self.assertEqual(cached_archive.read_bytes(), original_archive)
             self.assertEqual(source_archive.read_bytes(), original_archive)
             self.assertEqual(len(tuple((root / "var/lib/bunker-profile/prepared").iterdir())), 2)
+            curl.assert_not_called()
+
+    def test_sealed_kit_prepares_a_fresh_root_without_online_configuration(self):
+        verifier = b"""import argparse, hashlib, json, subprocess
+from pathlib import Path
+parser = argparse.ArgumentParser()
+parser.add_argument("action", choices=["verify"])
+parser.add_argument("--media-root", type=Path, required=True)
+parser.add_argument("--scope", required=True)
+parser.add_argument("--profile-sha256", required=True)
+args = parser.parse_args()
+root = args.media_root
+manifest = root / "kit-manifest.json"
+verified = subprocess.run(["openssl", "dgst", "-sha256", "-verify",
+                           str(root / "distribution/trust/bunker-product-release-2026.pem"),
+                           "-signature", str(root / "kit-manifest.sig"), str(manifest)], capture_output=True)
+if verified.returncode:
+    raise SystemExit(1)
+raw = manifest.read_bytes()
+kit = json.loads(raw)
+assert kit["scope"] == args.scope
+assert kit["profile_sha256"] == args.profile_sha256
+assert hashlib.sha256((root / "selection.json").read_bytes()).hexdigest() == args.profile_sha256
+print(json.dumps({"signed": True, "installed": False, "scope": args.scope,
+                  "manifest_sha256": hashlib.sha256(raw).hexdigest()}))
+"""
+        trust, archive = self.local_geo_fixture("product-11-prepare.py", b"""import json, sys
+from pathlib import Path
+args = sys.argv[1:]
+args.remove("--offline")
+opts = dict(zip(args[::2], args[1::2]))
+scope = json.loads(Path(opts["--profile"]).read_bytes())["selection"]["scope"]
+assert ("--geo-content-root" in opts) == (scope == "full")
+result = {"ok": True, "offline": True, "activated": False, "platform_inputs": {"transport_only": True}}
+if scope == "full":
+    result["geo_inputs"] = {"pack_signatures_verified": True}
+print(json.dumps(result))
+""", extra_scripts=(("scripts/release/verify-11-offline-kit.py", verifier),))
+        release_path = trust / "release-1.1.0.json"
+        release = json.loads(release_path.read_bytes())
+        release["platform_release"]["tag"] = "v1.1.0-rc1"
+        release["delivery_profiles"] = {"schema_version": "bunker.11-install-delivery/v1"}
+        release_path.write_text(json.dumps(release), encoding="utf-8")
+        subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(self.private),
+                        "-out", str(trust / "release-1.1.0.sig"), str(release_path)], check=True, capture_output=True)
+        url = "https://example.invalid/v1.1.0-rc1/release-1.1.0.json"
+        parent = self.root / "fresh acceptance"
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(bootstrap, "ACCEPTANCE_HOME", parent))
+            stack.enter_context(patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint))
+            stack.enter_context(patch.object(bootstrap.shutil, "disk_usage", return_value=SimpleNamespace(free=100 << 30)))
+            curl = stack.enter_context(patch.object(bootstrap, "curl",
+                                                   side_effect=AssertionError("kit attempted a network request")))
+            for scope in ("base", "full"):
+                with self.subTest(scope=scope):
+                    media = self.root / f"sealed {scope} kit"
+                    distribution = media / "distribution"
+                    shutil.copytree(trust, distribution / "trust")
+                    source = distribution / release["distribution"]["ops_source"]["path"]
+                    source.parent.mkdir()
+                    shutil.copyfile(archive, source)
+                    raw = json.dumps({"release_manifest_sha256": bootstrap.sha256(release_path),
+                                      "selection": {"scope": scope}}).encode()
+                    profile_sha = hashlib.sha256(raw).hexdigest()
+                    (media / "selection.json").write_bytes(raw)
+                    inventory = media / "kit-manifest.json"
+                    inventory.write_text(json.dumps({"scope": scope, "profile_sha256": profile_sha}))
+                    signature = media / "kit-manifest.sig"
+                    signature.write_bytes(b"bad signature")
+                    root = parent / f"release-110-{scope}"
+                    profile = root / "var/lib/bunker-installer/1.1.0/selection.json"
+                    cache = root / "var/cache/bunker-ai/1.1.0"
+                    ops = root / "opt/bunker/selection-releases"
+                    options = dict(offline=True, media_root=media, kit_profile_sha256=profile_sha)
+                    with self.assertRaisesRegex(bootstrap.BootstrapError, "reviewed profile SHA-256"):
+                        bootstrap.prepare_profile(url, "", "", cache, ops, root.name,
+                                                  **{**options, "kit_profile_sha256": "a" * 64})
+                    self.assertFalse(root.exists())
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        bootstrap.prepare_profile(url, "", "", cache, ops, root.name, **options)
+                    self.assertFalse(profile.exists())
+                    self.assertFalse((root / "var/lib/bunker-profile/prepared").exists())
+                    subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(self.private),
+                                    "-out", str(signature), str(inventory)], check=True, capture_output=True)
+                    with redirect_stdout(io.StringIO()) as output:
+                        bootstrap.prepare_profile(url, "", "", cache, ops, root.name, **options)
+                        bootstrap.prepare_profile(url, "", "", cache, ops, root.name, **options)
+                    first, retry = map(json.loads, output.getvalue().splitlines())
+                    self.assertEqual(first, retry)
+                    self.assertEqual(first["verified_kit_manifest_sha256"], bootstrap.sha256(inventory))
+                    self.assertEqual(first["prepared_profile_id"], profile_sha)
+                    self.assertEqual("geo_inputs" in first, scope == "full")
+                    self.assertEqual(profile.read_bytes(), raw)
+                    self.assertEqual((media / "selection.json").read_bytes(), raw)
+                    self.assertFalse(first["activated"])
+                    profile.write_bytes(b"preexisting different selection")
+                    with self.assertRaisesRegex(bootstrap.BootstrapError, "must not replace"):
+                        bootstrap.prepare_profile(url, "", "", cache, ops, root.name, **options)
+                    self.assertEqual(profile.read_bytes(), b"preexisting different selection")
             curl.assert_not_called()
 
     def test_wikipedia_bootstrap_verifies_local_ops_and_prepared_profiles_without_network(self):

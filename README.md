@@ -91,6 +91,16 @@ selected content under `selected/`, each at its signed path. Only
 verified bytes enter the caches; altered existing cache files are not
 replaced. The medium is never modified. This is selected-file intake,
 not validation or installation of a complete signed USB kit.
+
+If the isolated acceptance root is empty, add
+`--kit-profile-sha256 SHA256` to `--prepare-profile --offline --media-root DIR`,
+using the reviewed selection hash, not one supplied by the medium itself.
+From a trusted checkout, verify the signed kit independently before running
+the installer. The installer invokes the verified Ops kit checker again,
+prepares the exact Basic or Full selection, and saves it only after
+successful staging. A conflicting existing profile is never overwritten.
+This entry point needs no prior online `--configure`, but still does not
+install host packages, load images or start services.
 It also returns `prepared_profile_id`: the SHA-256 of the saved selection,
 retained with the verified release trust files under the same acceptance root.
 A different candidate requires its own manifest-bound selection.

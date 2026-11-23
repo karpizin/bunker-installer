@@ -5,7 +5,7 @@ set -eu
 usage() {
     printf '%s\n' 'Usage: sudo sh install.sh --prepare|--install-platform|--initialize-n8n|--activate-modules' \
         '       sudo sh install.sh --configure [--locale en|ru|zh-Hans] [--non-interactive [--choices-json FILE]] [--space-root DIR | --disk-layout-json FILE] [--min-free-after-bytes BYTES] [--probe-download]' \
-        '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --prepare-profile [--offline [--media-root DIR]]' \
+        '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --prepare-profile [--offline [--media-root DIR [--kit-profile-sha256 SHA256]]]' \
         '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --wikipedia setup-index|start-voice|start-operator|verify-chat|attach-chat|start-chat|install-base PROFILE_SHA256' \
         '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --wikipedia activate|recover PROFILE_SHA256 [ROLLBACK_SHA256]' \
         '       sudo sh install.sh --geo activate|recover|restart TRUST_DIR -- [managed Geo options]' \
@@ -25,6 +25,7 @@ action=$1
 shift
 version=1.0.0
 non_interactive='' choices='' probe_download='' space_root='' min_free_after_bytes='' disk_layout='' locale='' offline='' media_root=''
+kit_profile_sha256=''
 case "$action" in
     --wikipedia)
         if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then usage >&2; exit 2; fi
@@ -95,11 +96,18 @@ case "$action" in
                     media_root=$2
                     shift
                     ;;
+                --kit-profile-sha256)
+                    if [ -n "$kit_profile_sha256" ] ||
+                       ! printf '%s\n' "${2:-}" | grep -Eq '^[0-9a-f]{64}$'; then usage >&2; exit 2; fi
+                    kit_profile_sha256=$2
+                    shift
+                    ;;
                 *) usage >&2; exit 2 ;;
             esac
             shift
         done
         if [ -n "$media_root" ] && [ -z "$offline" ]; then usage >&2; exit 2; fi
+        if [ -n "$kit_profile_sha256" ] && [ -z "$media_root" ]; then usage >&2; exit 2; fi
         version=1.1.0
         ;;
     --prepare|--install-platform|--initialize-n8n|--activate-modules)
@@ -126,7 +134,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='0188a47768f65a3249146869591df7f5a464385280d589f8927555145adb8e80'
+bootstrap_sha256='a2f1ce761cffff3182836519e92c9d771b8954bc9499a5c1f6f45466750e56c0'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
@@ -220,6 +228,7 @@ elif [ "$action" = '--prepare-profile' ]; then
     set -- "$action" "$acceptance_id"
     if [ -n "$offline" ]; then set -- "$@" "$offline"; fi
     if [ -n "$media_root" ]; then set -- "$@" "--media-root=$media_root"; fi
+    if [ -n "$kit_profile_sha256" ]; then set -- "$@" "--kit-profile-sha256=$kit_profile_sha256"; fi
     ops_root="$root/opt/bunker/selection-releases"
 else
     set -- --source-root "$root/opt/bunker/module-sources" \
