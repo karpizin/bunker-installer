@@ -130,7 +130,10 @@ args.profile.write_text(args.choices_json.read_text())
                 package.addfile(entry, io.BytesIO(payload))
         document = json.loads(self.manifest.read_bytes())
         document.update(schema_version="bunker.appliance-release/v2", platform_release={"version": "1.1.0"},
-                        installation_catalog={"schema_version": "bunker.install-catalog/v2"})
+                        installation_catalog={"schema_version": "bunker.install-catalog/v2"},
+                        target_host={"disk_policy": "platform_plus_selected_catalog", "platform_disk_budget": {
+                            "asset_bytes": 120, "image_download_bytes": 400, "install_overhead_bytes": 50,
+                            "required_bytes": 570}})
         document["distribution"]["ops_source"].update(size_bytes=self.archive.stat().st_size,
                                                       sha256=bootstrap.sha256(self.archive))
         self.manifest.write_text(json.dumps(document))

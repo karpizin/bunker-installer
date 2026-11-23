@@ -129,12 +129,18 @@ class InstallEntryTests(unittest.TestCase):
             ("v1.1.0", ("--configure", "--choices-json", "/tmp/options")),
             ("v1.1.0", ("--configure", "--min-free-after-bytes", "-1")),
             ("v1.0.0", ("--prepare", "--min-free-after-bytes", "0")),
+            ("v1.1.0", ("--configure", "--space-root", "/target", "--disk-layout-json", "/plan")),
         ):
             with self.subTest(tag=tag, args=args):
                 self.env["BUNKER_RELEASE_TAG"] = tag
                 result = self.run_install(*args)
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertFalse(self.log.exists())
+
+    def test_configure_forwards_disk_layout_path_as_data(self):
+        result = self.run_install("--configure", "--disk-layout-json", "/tmp/disk plan.json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--disk-layout-json=/tmp/disk plan.json", self.log.read_text().splitlines())
 
     def test_acceptance_id_routes_all_paths_to_isolated_tree(self):
         self.env["BUNKER_ACCEPTANCE_ID"] = "release-100-rc3"

@@ -4,7 +4,7 @@ set -eu
 
 usage() {
     printf '%s\n' 'Usage: sudo sh install.sh --prepare|--install-platform|--initialize-n8n|--activate-modules' \
-        '       sudo sh install.sh --configure [--non-interactive [--choices-json FILE]] [--space-root DIR] [--min-free-after-bytes BYTES] [--probe-download]' \
+        '       sudo sh install.sh --configure [--non-interactive [--choices-json FILE]] [--space-root DIR | --disk-layout-json FILE] [--min-free-after-bytes BYTES] [--probe-download]' \
         'Use the complete release bundle; piping this script alone to sh is unsupported.'
 }
 
@@ -19,7 +19,7 @@ fi
 action=$1
 shift
 version=1.0.0
-non_interactive='' choices='' probe_download='' space_root='' min_free_after_bytes=''
+non_interactive='' choices='' probe_download='' space_root='' min_free_after_bytes='' disk_layout=''
 case "$action" in
     --configure)
         version=1.1.0
@@ -37,6 +37,11 @@ case "$action" in
                     space_root=$2
                     shift
                     ;;
+                --disk-layout-json)
+                    if [ "$#" -lt 2 ] || [ -z "$2" ]; then usage >&2; exit 2; fi
+                    disk_layout=$2
+                    shift
+                    ;;
                 --min-free-after-bytes)
                     if [ "$#" -lt 2 ]; then usage >&2; exit 2; fi
                     case "$2" in ''|*[!0-9]*) usage >&2; exit 2 ;; esac
@@ -48,6 +53,7 @@ case "$action" in
             shift
         done
         if [ -n "$choices" ] && [ -z "$non_interactive" ]; then usage >&2; exit 2; fi
+        if [ -n "$space_root" ] && [ -n "$disk_layout" ]; then usage >&2; exit 2; fi
         ;;
     --prepare|--install-platform|--initialize-n8n|--activate-modules)
         if [ "$#" -ne 0 ]; then usage >&2; exit 2; fi
@@ -71,7 +77,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='82273e3c4fc65d88bacb62f80400b12f15be0f970141c81dec29cdd7c141f7ec'
+bootstrap_sha256='e84cb49a6d89751429671e84ecde42b23886b9b3aecfbd261939f8a37c7e5202'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
@@ -112,6 +118,7 @@ if [ "$action" = '--configure' ]; then
     if [ -n "$choices" ]; then set -- "$@" "--choices-json=$choices"; fi
     if [ -n "$probe_download" ]; then set -- "$@" "$probe_download"; fi
     if [ -n "$space_root" ]; then set -- "$@" "--space-root=$space_root"; fi
+    if [ -n "$disk_layout" ]; then set -- "$@" "--disk-layout-json=$disk_layout"; fi
     if [ -n "$min_free_after_bytes" ]; then set -- "$@" "--min-free-after-bytes=$min_free_after_bytes"; fi
     ops_root="$root/opt/bunker/selection-releases"
 else

@@ -99,6 +99,10 @@ def ops_pin(manifest: Path, release_version: str = "1.0.0") -> dict[str, object]
         catalog = value.get("installation_catalog")
         if not isinstance(catalog, dict) or catalog.get("schema_version") != "bunker.install-catalog/v2":
             raise BootstrapError("signed 1.1.0 manifest lacks a world-bundle installation catalog")
+        host = value.get("target_host")
+        if (not isinstance(host, dict) or host.get("disk_policy") != "platform_plus_selected_catalog"
+                or not isinstance(host.get("platform_disk_budget"), dict)):
+            raise BootstrapError("signed 1.1.0 manifest lacks the platform disk budget")
     item = distribution.get("ops_source") if isinstance(distribution, dict) else None
     if not isinstance(item, dict):
         raise BootstrapError("signed manifest lacks the Ops source")
@@ -229,11 +233,14 @@ def bootstrap(manifest_url: str, signature_url: str, public_key_url: str,
 
 def configure_product(manifest_url: str, signature_url: str, public_key_url: str, cache: Path, ops_root: Path,
                       profile: Path, *, non_interactive: bool, choices: Path | None, probe_download: bool,
-                      space_root: Path | None = None, min_free_after_bytes: int = 0) -> Path | None:
+                      space_root: Path | None = None, min_free_after_bytes: int = 0,
+                      disk_layout: Path | None = None) -> Path | None:
     if choices is not None and not non_interactive:
         raise BootstrapError("choices file requires non-interactive configuration")
     if type(min_free_after_bytes) is not int or min_free_after_bytes < 0:
         raise BootstrapError("post-install free-space floor must be a nonnegative integer")
+    if space_root is not None and disk_layout is not None:
+        raise BootstrapError("space root and disk layout cannot be combined")
     # Keep this run's signature and catalog together even when another selection runs concurrently.
     with tempfile.TemporaryDirectory(prefix="bunker-selection-trust-") as directory:
         trust = Path(directory)
@@ -253,6 +260,8 @@ def configure_product(manifest_url: str, signature_url: str, public_key_url: str
             command.append("--probe-download")
         if space_root is not None:
             command += ["--space-root", str(space_root)]
+        if disk_layout is not None:
+            command += ["--disk-layout-json", str(disk_layout)]
         if min_free_after_bytes:
             command += ["--min-free-after-bytes", str(min_free_after_bytes)]
         result = subprocess.run(command, check=False)
@@ -341,6 +350,7 @@ def main() -> int:
     parser.add_argument("--choices-json", type=Path)
     parser.add_argument("--probe-download", action="store_true")
     parser.add_argument("--space-root", type=Path)
+    parser.add_argument("--disk-layout-json", type=Path)
     parser.add_argument("--min-free-after-bytes", type=int)
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--install-root", type=Path)
@@ -354,6 +364,7 @@ def main() -> int:
                                        args.ops_root, args.profile, non_interactive=args.non_interactive,
                                        choices=args.choices_json, probe_download=args.probe_download,
                                        space_root=args.space_root,
+                                       disk_layout=args.disk_layout_json,
                                        min_free_after_bytes=0 if args.min_free_after_bytes is None else args.min_free_after_bytes)
         except (BootstrapError, OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
             print(f"Bunker AI bootstrap: {error}", file=sys.stderr)
@@ -364,7 +375,7 @@ def main() -> int:
         print(json.dumps(result))
         return 0
     if (args.profile or args.non_interactive or args.choices_json or args.probe_download or args.space_root
-            or args.min_free_after_bytes is not None):
+            or args.min_free_after_bytes is not None or args.disk_layout_json is not None):
         parser.error("selection options require --configure")
     if args.source_root is None or args.install_root is None:
         parser.error("product operation requires --source-root and --install-root")
