@@ -6,7 +6,7 @@ usage() {
     printf '%s\n' 'Usage: sudo sh install.sh --prepare|--install-platform|--initialize-n8n|--activate-modules' \
         '       sudo sh install.sh --configure [--locale en|ru|zh-Hans] [--non-interactive [--choices-json FILE]] [--space-root DIR | --disk-layout-json FILE] [--min-free-after-bytes BYTES] [--probe-download]' \
         '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --prepare-profile' \
-        '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --wikipedia setup-index|start-voice|start-operator|verify-chat|attach-chat|install-base PROFILE_SHA256' \
+        '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --wikipedia setup-index|start-voice|start-operator|verify-chat|attach-chat|start-chat|install-base PROFILE_SHA256' \
         '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --wikipedia activate|recover PROFILE_SHA256 [ROLLBACK_SHA256]' \
         '       sudo sh install.sh --geo activate|recover|restart TRUST_DIR -- [managed Geo options]' \
         '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --geo activate|recover|restart prepared:PROFILE_SHA256 -- [managed Geo options]' \
@@ -30,7 +30,7 @@ case "$action" in
         if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then usage >&2; exit 2; fi
         case "$1" in
             activate|recover) ;;
-            setup-index|start-voice|start-operator|verify-chat|attach-chat|install-base) if [ "$#" -ne 2 ]; then usage >&2; exit 2; fi ;;
+            setup-index|start-voice|start-operator|verify-chat|attach-chat|start-chat|install-base) if [ "$#" -ne 2 ]; then usage >&2; exit 2; fi ;;
             *) usage >&2; exit 2 ;;
         esac
         for profile_id in "${2}" "${3:-$2}"; do
@@ -109,7 +109,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='f9de76b9e3a4b33a9f0e3dedf2bf757e600838872cbf42db79d36ad59a079db8'
+bootstrap_sha256='0e0ca6f91c91e84a39bccf975a7504af17459230c0ba5bc1e4e6180aac4396d5'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0

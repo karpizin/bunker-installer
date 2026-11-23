@@ -189,6 +189,7 @@ class InstallEntryTests(unittest.TestCase):
             ("release-110-rc1", ("restart", "a" * 64)),
             ("release-110-rc1", ("start-voice", "a" * 64, "b" * 64)),
             ("release-110-rc1", ("verify-chat", "a" * 64, "b" * 64)),
+            ("release-110-rc1", ("start-chat", "a" * 64, "b" * 64)),
             ("release-110-rc1", ("install-base", "a" * 64, "b" * 64)),
             ("release-110-rc1", ("activate", "a" * 64, "--ops-root", "/tmp/other")),
             ("release-100-rc22", ("recover", "a" * 64)),
@@ -199,7 +200,8 @@ class InstallEntryTests(unittest.TestCase):
 
     def test_base_setup_routes_through_the_prepared_signed_profile(self):
         self.env.update(BUNKER_ACCEPTANCE_ID="release-110-rc1")
-        for action in ("setup-index", "start-voice", "start-operator", "verify-chat", "attach-chat", "install-base"):
+        for action in ("setup-index", "start-voice", "start-operator", "verify-chat", "attach-chat",
+                       "start-chat", "install-base"):
             with self.subTest(action=action):
                 result = self.run_install("--wikipedia", action, "a" * 64)
                 self.assertEqual(result.returncode, 0, result.stderr)
