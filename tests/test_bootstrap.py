@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -286,11 +287,14 @@ print(json.dumps(result))
     def test_offline_profile_replays_only_local_verified_inputs(self):
         trust, archive = self.local_geo_fixture("product-11-prepare.py", b"""import json, sys
 from pathlib import Path
-assert sys.argv[-1] == "--offline"
-opts = dict(zip(sys.argv[1:-1:2], sys.argv[2:-1:2]))
+args = sys.argv[1:]
+args.remove("--offline")
+opts = dict(zip(args[::2], args[1::2]))
 scope = json.loads(Path(opts["--profile"]).read_bytes())["selection"]["scope"]
 assert ("--geo-content-root" in opts) == (scope == "full")
 result = {"ok": True, "offline": True, "activated": False, "platform_inputs": {"transport_only": True}}
+if "--media-root" in opts:
+    result["media"] = opts["--media-root"]
 if scope == "full":
     result["geo_inputs"] = {"pack_signatures_verified": True}
 print(json.dumps(result))
@@ -337,8 +341,30 @@ print(json.dumps(result))
             with self.assertRaisesRegex(bootstrap.BootstrapError, "checksum mismatch before staging"):
                 bootstrap.prepare_profile(url, "", "", cache, ops, root.name, offline=True)
             cached_signature.unlink()
-            with self.assertRaisesRegex(bootstrap.BootstrapError, "local trust cache"):
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "local trust"):
                 bootstrap.prepare_profile(url, "", "", cache, ops, root.name, offline=True)
+            cached_archive.unlink()
+            media = self.root / "removable drive"
+            staging = media / "distribution"
+            shutil.copytree(trust, staging / "trust")
+            source_archive = staging / release["distribution"]["ops_source"]["path"]
+            source_archive.parent.mkdir()
+            original_archive = archive.read_bytes()
+            source_archive.write_bytes(b"z" * len(original_archive))
+            with patch.object(bootstrap.shutil, "disk_usage", return_value=SimpleNamespace(free=80 << 30)):
+                with self.assertRaisesRegex(bootstrap.BootstrapError, "free-space floor"):
+                    bootstrap.prepare_profile(url, "", "", cache, ops, root.name, offline=True, media_root=media)
+            with patch.object(bootstrap.shutil, "disk_usage", return_value=SimpleNamespace(free=81 << 30)):
+                with self.assertRaisesRegex(bootstrap.BootstrapError, "media Ops archive checksum mismatch"):
+                    bootstrap.prepare_profile(url, "", "", cache, ops, root.name, offline=True, media_root=media)
+                self.assertFalse(cached_archive.exists())
+                source_archive.write_bytes(original_archive)
+                with redirect_stdout(io.StringIO()) as output:
+                    bootstrap.prepare_profile(url, "", "", cache, ops, root.name, offline=True, media_root=media)
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["media"], str(media))
+            self.assertEqual(cached_archive.read_bytes(), original_archive)
+            self.assertEqual(source_archive.read_bytes(), original_archive)
             self.assertEqual(len(tuple((root / "var/lib/bunker-profile/prepared").iterdir())), 2)
             curl.assert_not_called()
 

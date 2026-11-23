@@ -181,9 +181,13 @@ class InstallEntryTests(unittest.TestCase):
                          ["--prepare-profile", "release-110-offline", "--offline"])
         self.log.unlink()
         for args in (("--configure", "--offline"), ("--prepare", "--offline"),
-                     ("--prepare-profile", "--offline", "--offline")):
+                     ("--prepare-profile", "--offline", "--offline"),
+                     ("--prepare-profile", "--media-root", "/tmp/media")):
             self.assertEqual(self.run_install(*args).returncode, 2)
             self.assertFalse(self.log.exists())
+        result = self.run_install("--prepare-profile", "--offline", "--media-root", "/tmp/local media")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--media-root=/tmp/local media", self.log.read_text().splitlines())
 
     def test_wikipedia_passes_only_prepared_profile_ids_for_the_candidate(self):
         self.env.update(BUNKER_ACCEPTANCE_ID="release-110-rc1")

@@ -81,7 +81,16 @@ and the verified Ops archive at its manifest-provided cache path. Preparation
 checks the requested release tag, saved profile and selected cache bytes.
 Missing or damaged files fail without fetching replacements. Full requires
 the local pinned Geo verifier image; Basic does not touch Geo. This mode does
-not load host packages or container images, import a USB kit, or start services.
+not load host packages or container images or start services.
+
+Use `--prepare-profile --offline --media-root DIR` to fill missing cache
+entries from a local medium instead. The saved selection must already be in
+the acceptance root. The medium contains signed 1.1 trust files under
+`distribution/trust/`, Ops and platform files under `distribution/`, and
+selected content under `selected/`, each at its signed path. Only
+verified bytes enter the caches; altered existing cache files are not
+replaced. The medium is never modified. This is selected-file intake,
+not validation or installation of a complete signed USB kit.
 It also returns `prepared_profile_id`: the SHA-256 of the saved selection,
 retained with the verified release trust files under the same acceptance root.
 A different candidate requires its own manifest-bound selection.

@@ -26,6 +26,7 @@ ACCEPTANCE_HOME = Path("/var/lib/bunker-acceptance-11")
 PROFILE_ID = re.compile(r"[0-9a-f]{64}")
 TRUST_FILES = ("release-1.1.0.json", "release-1.1.0.sig", "bunker-product-release-2026.pem")
 OFFLINE_TRUST_LIMITS = (2 << 20, 64 << 10, 64 << 10)
+PROFILE_FREE_FLOOR = 80 << 30
 
 
 class BootstrapError(RuntimeError):
@@ -382,11 +383,44 @@ def save_prepared_profile(root: Path, trust: Path, profile_id: str) -> None:
                 raise BootstrapError("prepared profile trust snapshot differs from the existing snapshot")
 
 
-def offline_profile_source(manifest_url: str, cache: Path, trust: Path, ops_root: Path) -> Path:
-    cached = tuple(cache / "trust" / name for name in TRUST_FILES)
-    check_profile_paths(*cached)
-    if not all(path.is_file() for path in cached):
-        raise BootstrapError("offline staging requires the signed 1.1 release files in the local trust cache")
+def import_media_ops(source: Path, archive: Path, pin: dict[str, object]) -> None:
+    size = pin["size_bytes"]
+    if type(size) is not int or not 0 < size <= MAX_OPS_BYTES or source.resolve() != source or not source.is_file():
+        raise BootstrapError("offline media Ops source is missing, linked or oversized")
+    archive.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if shutil.disk_usage(archive.parent).free < PROFILE_FREE_FLOOR + size:
+        raise BootstrapError("free-space floor blocks importing the offline media Ops archive")
+    with tempfile.TemporaryDirectory(prefix=".media-ops-", dir=archive.parent) as directory:
+        staged = Path(directory) / "ops"
+        digest = hashlib.sha256()
+        with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+                raise BootstrapError("offline media Ops archive size or type differs")
+            with staged.open("xb") as copy:
+                remaining = size
+                while remaining:
+                    block = stream.read(min(1 << 20, remaining))
+                    if not block:
+                        break
+                    digest.update(block)
+                    copy.write(block)
+                    remaining -= len(block)
+                if remaining or stream.read(1) or digest.hexdigest() != pin["sha256"]:
+                    raise BootstrapError("offline media Ops archive checksum mismatch")
+                copy.flush()
+                os.fsync(copy.fileno())
+        os.link(staged, archive, follow_symlinks=False)
+
+
+def offline_profile_source(manifest_url: str, cache: Path, trust: Path, ops_root: Path,
+                           media_root: Path | None = None) -> Path:
+    distribution = cache if media_root is None else media_root / "distribution"
+    cached = tuple(distribution / "trust" / name for name in TRUST_FILES)
+    if media_root is None:
+        check_profile_paths(*cached)
+    if not all(path.resolve() == path and path.is_file() for path in cached):
+        raise BootstrapError("offline staging requires the signed 1.1 release files in local trust")
     for source, limit in zip(cached, OFFLINE_TRUST_LIMITS):
         with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
             info = os.fstat(stream.fileno())
@@ -405,12 +439,19 @@ def offline_profile_source(manifest_url: str, cache: Path, trust: Path, ops_root
         raise BootstrapError("offline signed release tag does not match the requested release tag")
     archive = cache / str(pin["path"])
     check_profile_paths(archive)
+    if media_root is not None and not os.path.lexists(archive):
+        import_media_ops(distribution / str(pin["path"]), archive, pin)
     return stage_ops(archive, pin, ops_root)
 
 
 def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
-                    cache: Path, ops_root: Path, acceptance_id: str, *, offline: bool = False) -> None:
+                    cache: Path, ops_root: Path, acceptance_id: str, *, offline: bool = False,
+                    media_root: Path | None = None) -> None:
     root = acceptance_profile_root(cache, ops_root, acceptance_id)
+    if media_root is not None and (not offline or not media_root.is_absolute() or media_root == Path("/")
+                                   or media_root.resolve() != media_root or not media_root.is_dir()
+                                   or media_root.is_relative_to(root) or root.is_relative_to(media_root)):
+        raise BootstrapError("offline media requires a separate, canonical directory")
     profile = root / "var/lib/bunker-installer/1.1.0/selection.json"
     common = profile_destinations(root, include_geo=False)
     check_profile_paths(cache, ops_root, profile, root / "var/lib/bunker-profile/prepared", *common.values())
@@ -420,7 +461,7 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
     with tempfile.TemporaryDirectory(prefix="bunker-profile-trust-") as directory:
         trust = Path(directory)
         if offline:
-            target = offline_profile_source(manifest_url, cache, trust, ops_root)
+            target = offline_profile_source(manifest_url, cache, trust, ops_root, media_root)
         else:
             target = bootstrap(manifest_url, signature_url, public_key_url, cache, ops_root,
                                release_version="1.1.0", private_trust=trust)
@@ -450,11 +491,13 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
                    "--signature", str(trust / "release-1.1.0.sig"), "--public-key",
                    str(trust / "bunker-product-release-2026.pem"), "--profile", str(snapshot),
                    "--source-root", str(target), "--distribution-root", str(cache),
-                   "--min-free-after-bytes", str(80 * 1024**3)]
+                   "--min-free-after-bytes", str(PROFILE_FREE_FLOOR)]
         for name, path in destinations.items():
             command += ["--" + name, str(path)]
         if offline:
             command.append("--offline")
+        if media_root is not None:
+            command += ["--media-root", str(media_root)]
         result = json.loads(subprocess.check_output(command, text=True))
         if not isinstance(result, dict) or result.get("ok") is not True or result.get("activated") is not False:
             raise BootstrapError("verified Ops preparer did not report successful staging")
@@ -681,6 +724,7 @@ def main() -> int:
     parser.add_argument("--choices-json", type=Path)
     parser.add_argument("--probe-download", action="store_true")
     parser.add_argument("--offline", action="store_true", help="use only verified local caches for --prepare-profile")
+    parser.add_argument("--media-root", type=Path, help="read local media when preparing offline")
     parser.add_argument("--space-root", type=Path)
     parser.add_argument("--disk-layout-json", type=Path)
     parser.add_argument("--min-free-after-bytes", type=int)
@@ -690,6 +734,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.offline and args.prepare_profile is None:
         parser.error("--offline requires --prepare-profile")
+    if args.media_root is not None and not args.offline:
+        parser.error("--media-root requires --prepare-profile --offline")
     if args.configure:
         if args.profile is None or (args.choices_json is not None and not args.non_interactive):
             parser.error("--configure requires --profile; --choices-json requires --non-interactive")
@@ -716,7 +762,8 @@ def main() -> int:
             parser.error("profile preparation does not take explicit service or install roots")
         try:
             prepare_profile(args.manifest_url, args.signature_url, args.public_key_url,
-                            args.cache, args.ops_root, args.prepare_profile, offline=args.offline)
+                            args.cache, args.ops_root, args.prepare_profile,
+                            offline=args.offline, media_root=args.media_root)
         except (BootstrapError, OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
             print(f"Bunker AI bootstrap: {error}", file=sys.stderr)
             return 1
