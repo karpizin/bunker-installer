@@ -6,6 +6,7 @@ usage() {
     printf '%s\n' 'Usage: sudo sh install.sh --prepare|--install-platform|--initialize-n8n|--activate-modules' \
         '       sudo sh install.sh --configure [--locale en|ru|zh-Hans] [--non-interactive [--choices-json FILE]] [--space-root DIR | --disk-layout-json FILE] [--min-free-after-bytes BYTES] [--probe-download]' \
         '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --prepare-profile' \
+        '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --wikipedia activate|recover PROFILE_SHA256 [ROLLBACK_SHA256]' \
         '       sudo sh install.sh --geo activate|recover|restart TRUST_DIR -- [managed Geo options]' \
         '       sudo env BUNKER_ACCEPTANCE_ID=release-110-rc1 sh install.sh --geo activate|recover|restart prepared:PROFILE_SHA256 -- [managed Geo options]' \
         'Use the complete release bundle; piping this script alone to sh is unsupported.'
@@ -24,6 +25,14 @@ shift
 version=1.0.0
 non_interactive='' choices='' probe_download='' space_root='' min_free_after_bytes='' disk_layout='' locale=''
 case "$action" in
+    --wikipedia)
+        if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then usage >&2; exit 2; fi
+        case "$1" in activate|recover) ;; *) usage >&2; exit 2 ;; esac
+        for profile_id in "${2}" "${3:-$2}"; do
+            if ! printf '%s\n' "$profile_id" | grep -Eq '^[0-9a-f]{64}$'; then usage >&2; exit 2; fi
+        done
+        version=1.1.0
+        ;;
     --geo)
         if [ "$#" -lt 3 ] || [ -z "$2" ] || [ "$3" != '--' ]; then usage >&2; exit 2; fi
         case "$1" in activate|recover|restart) geo_action=$1 ;; *) usage >&2; exit 2 ;; esac
@@ -95,7 +104,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='2850d12cf49a4771a3bc59d2efc82c61f7c96f09c1508950704ff732f11e5dad'
+bootstrap_sha256='dc8a91de7725834b7d5f91fd6c82940a8bce4555e9c9e5a2fb20dd0ca2059309'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
@@ -129,6 +138,21 @@ if [ -n "$acceptance_id" ]; then
         exit 2
     fi
     root="/var/lib/bunker-acceptance/$acceptance_id"
+fi
+if [ "$action" = '--wikipedia' ]; then
+    if ! printf '%s\n' "$acceptance_id" | grep -Eq '^release-110-[a-z0-9][a-z0-9-]{0,51}$'; then
+        printf '%s\n' 'Managed Wikipedia requires a lowercase release-110-* acceptance ID.' >&2
+        exit 2
+    fi
+    wiki_action=$1
+    if [ "$#" -eq 3 ]; then
+        set -- --prepared-profile "$2" --rollback-prepared "$3"
+    else
+        set -- --prepared-profile "$2"
+    fi
+    python3 "$trusted_bootstrap" --wikipedia "$wiki_action" --acceptance-id "$acceptance_id" \
+        --ops-cache "$root/var/cache/bunker-ai/$version" --ops-root "$root/opt/bunker/selection-releases" "$@"
+    exit
 fi
 if [ "$action" = '--geo' ]; then
     case "$acceptance_id" in

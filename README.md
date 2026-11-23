@@ -100,3 +100,15 @@ signature, profile and cache. Use `restart` for the already-selected profile;
 it refuses a pending switch rather than changing the selector. Do not use
 this command on a 1.0 acceptance root or on an unmanaged service. This is
 not a clean offline installer and is not shipped as part of 1.0.0.
+
+The 1.1 development bundle also accepts
+`--wikipedia activate PROFILE_SHA256 [PREVIOUS_PROFILE_SHA256]` and
+`--wikipedia recover PROFILE_SHA256 [PREVIOUS_PROFILE_SHA256]` with the
+same lowercase `BUNKER_ACCEPTANCE_ID=release-110-*` used for preparation.
+It uses only the local saved profiles, verified Ops and platform manifest,
+selected archives, and the prepared platform environment and index. The
+dedicated platform Compose project and Qdrant must already be set up;
+the command does not install the platform, build the index or adopt an
+unmanaged Gateway. Recovery must use the same candidate and, for a switch,
+the same previous profile as the interrupted command. No administrator
+account or password is needed for Gateway startup.

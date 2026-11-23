@@ -530,9 +530,58 @@ def geo_entry(argv: list[str]) -> int:
     return 0
 
 
+def run_prepared_wikipedia(action: str, profile_id: str, rollback_id: str | None, cache: Path,
+                           ops_root: Path, acceptance_id: str) -> None:
+    if action not in {"activate", "recover"} or not re.fullmatch(r"release-110-[a-z0-9][a-z0-9-]{0,51}", acceptance_id):
+        raise BootstrapError("managed Wikipedia requires a lowercase release-110-* acceptance ID and a valid action")
+    root = acceptance_profile_root(cache, ops_root, acceptance_id)
+    bundle = prepared_profile_files(root, profile_id)
+    if rollback_id is not None:
+        if rollback_id == profile_id:
+            raise BootstrapError("Wikipedia rollback must identify a different prepared profile")
+        prepared_profile_files(root, rollback_id)
+    check_profile_paths(cache, ops_root)
+    manifest, signature, key = (bundle / name for name in TRUST_FILES)
+    verify_signature(manifest, signature, key)
+    item = ops_pin(manifest, "1.1.0")
+    archive = cache / str(item["path"])
+    check_profile_paths(archive)
+    if not archive.is_file():
+        raise BootstrapError("the pinned Ops archive must already be in the local cache")
+    target = stage_ops(archive, item, ops_root)
+    script = target / "scripts/install/product-11-wikipedia.py"
+    if not script.is_file() or script.is_symlink():
+        raise BootstrapError("verified Ops source lacks the managed Wikipedia command")
+    command = [sys.executable, "-B", str(script), action, "--acceptance-id", acceptance_id,
+               "--prepared-profile", profile_id]
+    if rollback_id is not None:
+        command.extend(["--rollback-prepared", rollback_id])
+    subprocess.run(command, check=True)
+
+
+def wikipedia_entry(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="product-bootstrap.py --wikipedia", allow_abbrev=False)
+    parser.add_argument("action", choices=("activate", "recover"))
+    parser.add_argument("--acceptance-id", required=True)
+    parser.add_argument("--prepared-profile", required=True)
+    parser.add_argument("--rollback-prepared")
+    parser.add_argument("--ops-cache", required=True, type=Path)
+    parser.add_argument("--ops-root", required=True, type=Path)
+    args = parser.parse_args(argv)
+    try:
+        run_prepared_wikipedia(args.action, args.prepared_profile, args.rollback_prepared,
+                               args.ops_cache, args.ops_root, args.acceptance_id)
+    except (BootstrapError, OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
+        print(f"Bunker AI Wikipedia bootstrap: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> int:
     if sys.argv[1:2] == ["--geo"]:
         return geo_entry(sys.argv[2:])
+    if sys.argv[1:2] == ["--wikipedia"]:
+        return wikipedia_entry(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest-url", required=True)
     parser.add_argument("--signature-url", required=True)

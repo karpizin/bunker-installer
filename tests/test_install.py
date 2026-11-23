@@ -173,6 +173,27 @@ class InstallEntryTests(unittest.TestCase):
                                 "--ops-root", root + "/opt/bunker/selection-releases",
                                 "--trust-dir", "/tmp/release trust", "--", "--profile", "/tmp/my profile"])
 
+    def test_wikipedia_passes_only_prepared_profile_ids_for_the_candidate(self):
+        self.env.update(BUNKER_ACCEPTANCE_ID="release-110-rc1")
+        result = self.run_install("--wikipedia", "recover", "a" * 64, "b" * 64)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        opts = self.log.read_text().splitlines()[1:]
+        root = "/var/lib/bunker-acceptance/release-110-rc1"
+        self.assertEqual(opts, ["--wikipedia", "recover", "--acceptance-id", "release-110-rc1",
+                                "--ops-cache", root + "/var/cache/bunker-ai/1.1.0",
+                                "--ops-root", root + "/opt/bunker/selection-releases",
+                                "--prepared-profile", "a" * 64, "--rollback-prepared", "b" * 64])
+        self.log.unlink()
+        for acceptance, options in (
+            ("release-110-rc1", ("activate", "/tmp/profile")),
+            ("release-110-rc1", ("restart", "a" * 64)),
+            ("release-110-rc1", ("activate", "a" * 64, "--ops-root", "/tmp/other")),
+            ("release-100-rc22", ("recover", "a" * 64)),
+        ):
+            self.env["BUNKER_ACCEPTANCE_ID"] = acceptance
+            self.assertEqual(self.run_install("--wikipedia", *options).returncode, 2)
+            self.assertFalse(self.log.exists())
+
     def test_prepared_geo_routes_to_the_isolated_acceptance_root(self):
         identity = "a" * 64
         result = self.run_install("--geo", "activate", f"prepared:{identity}", "--")

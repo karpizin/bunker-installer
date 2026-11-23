@@ -240,6 +240,40 @@ Path(options['--env-file']).write_text(json.dumps({
                 bootstrap.prepare_profile(*self.arguments[:3], cache, ops, acceptance.name)
             start.assert_not_called()
 
+    def test_wikipedia_bootstrap_verifies_local_ops_and_prepared_profiles_without_network(self):
+        trust, _ = self.local_geo_fixture(
+            "product-11-prepare.py", b'print(\'{"ok": true, "activated": false}\')\n',
+            extra_scripts=[("scripts/install/product-11-wikipedia.py", b'import sys; assert sys.argv[1] in ("activate", "recover")\n')])
+        self.urls[self.arguments[0]] = trust / "release-1.1.0.json"
+        self.urls[self.arguments[1]] = trust / "release-1.1.0.sig"
+        acceptance = self.root / "release-110-rc1"
+        cache = acceptance / "var/cache/bunker-ai/1.1.0"
+        ops = acceptance / "opt/bunker/selection-releases"
+        profile = acceptance / "var/lib/bunker-installer/1.1.0/selection.json"
+        profile.parent.mkdir(parents=True)
+        ids = []
+        with patch.object(bootstrap, "ACCEPTANCE_HOME", self.root), \
+                patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \
+                patch.object(bootstrap, "curl", side_effect=self.download) as network:
+            for name in ("previous", "candidate"):
+                profile.write_text(json.dumps({"release_manifest_sha256": bootstrap.sha256(trust / "release-1.1.0.json"),
+                                               "selection": {"name": name}}))
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    bootstrap.prepare_profile(*self.arguments[:3], cache, ops, acceptance.name)
+                ids.append(json.loads(output.getvalue())["prepared_profile_id"])
+            network.reset_mock()
+            bootstrap.run_prepared_wikipedia("activate", ids[0], None, cache, ops, acceptance.name)
+            bootstrap.run_prepared_wikipedia("recover", ids[1], ids[0], cache, ops, acceptance.name)
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "different prepared"):
+                bootstrap.run_prepared_wikipedia("recover", ids[1], ids[1], cache, ops, acceptance.name)
+            saved = bootstrap.prepared_profile_files(acceptance, ids[0]) / "selection.json"
+            saved.chmod(0o600)
+            saved.write_text("tampered")
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "missing or changed"):
+                bootstrap.run_prepared_wikipedia("recover", ids[1], ids[0], cache, ops, acceptance.name)
+            network.assert_not_called()
+
     def test_managed_geo_dispatches_each_step_offline_from_signed_source(self):
         trust, _archive = self.local_geo_fixture()
         profile = self.root / "selected profile.json"
