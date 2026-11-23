@@ -241,11 +241,53 @@ Path(options['--env-file']).write_text(json.dumps({
                 bootstrap.prepare_profile(*self.arguments[:3], cache, ops, acceptance.name)
             start.assert_not_called()
 
+    def test_prepare_profile_routes_signed_basic_and_full_separately(self):
+        trust, _ = self.local_geo_fixture("product-11-prepare.py", b"""import json, sys
+from pathlib import Path
+options = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+scope = json.loads(Path(options["--profile"]).read_bytes())["selection"]["scope"]
+assert ("--geo-content-root" in options) == (scope == "full")
+result = {"ok": True, "activated": False, "platform_inputs": {"transport_only": True}}
+if scope == "full":
+    result["geo_inputs"] = {"pack_signatures_verified": True}
+print(json.dumps(result))
+""")
+        manifest = trust / "release-1.1.0.json"
+        signature = trust / "release-1.1.0.sig"
+        document = json.loads(manifest.read_bytes())
+        document["delivery_profiles"] = {"schema_version": "bunker.11-install-delivery/v1"}
+        manifest.write_text(json.dumps(document))
+        subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(self.private),
+                        "-out", str(signature), str(manifest)], check=True, capture_output=True)
+        self.urls[self.arguments[0]], self.urls[self.arguments[1]] = manifest, signature
+        root = self.root / "release-110-test"
+        cache, ops = root / "var/cache/bunker-ai/1.1.0", root / "opt/bunker/selection-releases"
+        profile = root / "var/lib/bunker-installer/1.1.0/selection.json"
+        profile.parent.mkdir(parents=True)
+        with patch.object(bootstrap, "ACCEPTANCE_HOME", self.root), \
+                patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \
+                patch.object(bootstrap, "curl", side_effect=self.download):
+            for scope in ("base", "full", None, "other"):
+                with self.subTest(scope=scope):
+                    profile.write_text(json.dumps({"release_manifest_sha256": bootstrap.sha256(manifest),
+                                                   "selection": {"scope": scope} if scope is not None else {}}))
+                    if scope in ("base", "full"):
+                        with redirect_stdout(io.StringIO()) as output:
+                            bootstrap.prepare_profile(*self.arguments[:3], cache, ops, root.name)
+                        prepared = json.loads(output.getvalue())
+                        self.assertEqual("geo_inputs" in prepared, scope == "full")
+                        bootstrap.prepared_profile_files(root, prepared["prepared_profile_id"])
+                    else:
+                        with patch.object(bootstrap.subprocess, "check_output") as stage:
+                            with self.assertRaisesRegex(bootstrap.BootstrapError, "scope is not supported"):
+                                bootstrap.prepare_profile(*self.arguments[:3], cache, ops, root.name)
+                            stage.assert_not_called()
+
     def test_wikipedia_bootstrap_verifies_local_ops_and_prepared_profiles_without_network(self):
         trust, _ = self.local_geo_fixture(
             "product-11-prepare.py", b'print(\'{"ok": true, "activated": false, "platform_inputs": {"transport_only": true}}\')\n',
             extra_scripts=[("scripts/install/product-11-wikipedia.py",
-                            b'import sys; assert sys.argv[1] in ("activate", "recover", "setup-index", "start-voice", "start-operator", "verify-chat", "attach-chat")\n')])
+                            b'import sys; assert sys.argv[1] in ("activate", "recover", "setup-index", "start-voice", "start-operator", "verify-chat", "attach-chat", "install-base")\n')])
         self.urls[self.arguments[0]] = trust / "release-1.1.0.json"
         self.urls[self.arguments[1]] = trust / "release-1.1.0.sig"
         acceptance = self.root / "release-110-rc1"
@@ -271,6 +313,7 @@ Path(options['--env-file']).write_text(json.dumps({
             bootstrap.run_prepared_wikipedia("start-operator", ids[0], None, cache, ops, acceptance.name)
             bootstrap.run_prepared_wikipedia("verify-chat", ids[0], None, cache, ops, acceptance.name)
             bootstrap.run_prepared_wikipedia("attach-chat", ids[0], None, cache, ops, acceptance.name)
+            bootstrap.run_prepared_wikipedia("install-base", ids[0], None, cache, ops, acceptance.name)
             with self.assertRaisesRegex(bootstrap.BootstrapError, "does not accept a rollback"):
                 bootstrap.run_prepared_wikipedia("attach-chat", ids[0], ids[1], cache, ops, acceptance.name)
             bootstrap.run_prepared_wikipedia("recover", ids[1], ids[0], cache, ops, acceptance.name)

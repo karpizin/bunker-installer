@@ -321,14 +321,16 @@ def acceptance_profile_root(cache: Path, ops_root: Path, acceptance_id: str) -> 
     return root
 
 
-def profile_destinations(root: Path) -> dict[str, Path]:
+def profile_destinations(root: Path, *, include_geo: bool = True) -> dict[str, Path]:
     staging = root / "var/lib/bunker-profile"
-    return {
+    destinations = {
         "cache-root": root / "var/cache/bunker-selected",
         "model-root": staging / "models",
         "runtime-staging-root": staging / "runtime",
-        "geo-content-root": root / "var/lib/bunker-platform/modules/geo/content",
     }
+    if include_geo:
+        destinations["geo-content-root"] = root / "var/lib/bunker-platform/modules/geo/content"
+    return destinations
 
 
 def check_profile_paths(*paths: Path) -> None:
@@ -383,8 +385,8 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
                     cache: Path, ops_root: Path, acceptance_id: str) -> None:
     root = acceptance_profile_root(cache, ops_root, acceptance_id)
     profile = root / "var/lib/bunker-installer/1.1.0/selection.json"
-    destinations = profile_destinations(root)
-    check_profile_paths(cache, ops_root, profile, root / "var/lib/bunker-profile/prepared", *destinations.values())
+    common = profile_destinations(root, include_geo=False)
+    check_profile_paths(cache, ops_root, profile, root / "var/lib/bunker-profile/prepared", *common.values())
     if not profile.is_file():
         raise BootstrapError("no saved profile in this acceptance root; run --configure first")
 
@@ -398,6 +400,18 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
         saved = json.loads(snapshot.read_bytes())
         if not isinstance(saved, dict) or saved.get("release_manifest_sha256") != sha256(trust / TRUST_FILES[0]):
             raise BootstrapError("saved profile is not bound to the verified 1.1 manifest")
+        choices = saved.get("selection")
+        if not isinstance(choices, dict):
+            raise BootstrapError("saved profile does not contain a selection")
+        release = json.loads((trust / TRUST_FILES[0]).read_bytes())
+        scoped = "delivery_profiles" in release
+        scope = choices.get("scope")
+        if (scoped and scope not in ("base", "full")) or (not scoped and "scope" in choices):
+            raise BootstrapError("saved delivery scope is not supported by the verified release")
+        # This only selects CLI arguments. The pinned Ops preparer re-resolves the signed profile.
+        destinations = profile_destinations(root, include_geo=scope != "base")
+        if "geo-content-root" in destinations:
+            check_profile_paths(destinations["geo-content-root"])
         profile_id = sha256(snapshot)
         script = target / "scripts/install/product-11-prepare.py"
         if not script.is_file() or script.is_symlink():
@@ -415,6 +429,8 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
         inputs = result.get("platform_inputs")
         if not isinstance(inputs, dict) or inputs.get("transport_only") is not True:
             raise BootstrapError("verified Ops preparer did not stage the base platform inputs")
+        if scoped and (("geo_inputs" in result) != (scope == "full")):
+            raise BootstrapError("verified Ops preparation does not match the selected delivery scope")
         save_prepared_profile(root, trust, profile_id)
         print(json.dumps({**result, "prepared_profile_id": profile_id}, sort_keys=True))
 
@@ -550,7 +566,7 @@ def geo_entry(argv: list[str]) -> int:
     return 0
 
 
-BASE_PROFILE_ACTIONS = ("setup-index", "start-voice", "start-operator", "verify-chat", "attach-chat")
+BASE_PROFILE_ACTIONS = ("setup-index", "start-voice", "start-operator", "verify-chat", "attach-chat", "install-base")
 
 
 def run_prepared_wikipedia(action: str, profile_id: str, rollback_id: str | None, cache: Path,

@@ -117,3 +117,11 @@ the command does not install the platform, build the index or adopt an
 unmanaged Gateway. Recovery must use the same candidate and, for a switch,
 the same previous profile as the interrupted command. No administrator
 account or password is needed for Gateway startup.
+
+For a saved, scoped Basic selection, `--prepare-profile` leaves Geo unstaged.
+`--wikipedia install-base PROFILE_SHA256` uses the same local signed snapshot
+to bring up only the base platform and Console. It requires all eight signed
+base images to be present and the dedicated prepared chat model unit to be
+running already. It does not start a model, load images, activate Full or
+replace a legacy installation. This is a development entry point for a
+dedicated 1.1 acceptance root, not evidence of an accepted release.
