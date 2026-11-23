@@ -5,6 +5,7 @@ set -eu
 usage() {
     printf '%s\n' 'Usage: sudo sh install.sh --prepare|--install-platform|--initialize-n8n|--activate-modules' \
         '       sudo sh install.sh --configure [--locale en|ru|zh-Hans] [--non-interactive [--choices-json FILE]] [--space-root DIR | --disk-layout-json FILE] [--min-free-after-bytes BYTES] [--probe-download]' \
+        '       sudo sh install.sh --geo activate|recover|restart TRUST_DIR -- [managed Geo options]' \
         'Use the complete release bundle; piping this script alone to sh is unsupported.'
 }
 
@@ -21,6 +22,13 @@ shift
 version=1.0.0
 non_interactive='' choices='' probe_download='' space_root='' min_free_after_bytes='' disk_layout='' locale=''
 case "$action" in
+    --geo)
+        if [ "$#" -lt 3 ] || [ -z "$2" ] || [ "$3" != '--' ]; then usage >&2; exit 2; fi
+        case "$1" in activate|recover|restart) geo_action=$1 ;; *) usage >&2; exit 2 ;; esac
+        geo_trust=$2
+        shift 3
+        version=1.1.0
+        ;;
     --configure)
         version=1.1.0
         while [ "$#" -gt 0 ]; do
@@ -81,7 +89,7 @@ if [ ! -f "$bootstrap" ] || [ -L "$bootstrap" ]; then
     printf '%s\n' 'Missing regular bundled product-bootstrap.py; do not run install.sh alone.' >&2
     exit 1
 fi
-bootstrap_sha256='c1d37bdfa481d402c9ab00ee72a5f6f5caf8124e7cdbd3e8a422538e7688b7fe'
+bootstrap_sha256='961134a841d7ab8632abe297ee466afcc06459df94ef3acdc0018651759b9670'
 umask 077
 temporary=$(mktemp -d /tmp/bunker-bootstrap.XXXXXXXX)
 trap 'rm -rf -- "$temporary"' 0
@@ -115,6 +123,15 @@ if [ -n "$acceptance_id" ]; then
         exit 2
     fi
     root="/var/lib/bunker-acceptance/$acceptance_id"
+fi
+if [ "$action" = '--geo' ]; then
+    case "$acceptance_id" in
+        release-100-*) printf '%s\n' 'Managed Geo requires a separate 1.1 project, not a 1.0 acceptance root.' >&2; exit 2 ;;
+    esac
+    python3 "$trusted_bootstrap" --geo "$geo_action" --trust-dir "$geo_trust" \
+        --ops-cache "$root/var/cache/bunker-ai/$version" \
+        --ops-root "$root/opt/bunker/selection-releases" -- "$@"
+    exit
 fi
 if [ "$action" = '--configure' ]; then
     set -- "$action" --profile "$root/var/lib/bunker-installer/$version/selection.json"

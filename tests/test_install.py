@@ -142,6 +142,26 @@ class InstallEntryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--disk-layout-json=/tmp/disk plan.json", self.log.read_text().splitlines())
 
+    def test_geo_uses_local_11_cache_and_preserves_argument_boundaries(self):
+        self.env.update(BUNKER_ACCEPTANCE_ID="release-110-geo")
+        result = self.run_install("--geo", "recover", "/tmp/release trust", "--", "--profile", "/tmp/my profile")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        opts = self.log.read_text().splitlines()[1:]
+        root = "/var/lib/bunker-acceptance/release-110-geo"
+        self.assertEqual(opts, ["--geo", "recover", "--trust-dir", "/tmp/release trust",
+                                "--ops-cache", root + "/var/cache/bunker-ai/1.1.0",
+                                "--ops-root", root + "/opt/bunker/selection-releases",
+                                "--", "--profile", "/tmp/my profile"])
+
+    def test_geo_refuses_invalid_action_or_legacy_acceptance_root(self):
+        self.assertEqual(self.run_install("--geo", "down", "/trust", "--").returncode, 2)
+        self.assertEqual(self.run_install("--geo", "restart", "/trust").returncode, 2)
+        self.env["BUNKER_ACCEPTANCE_ID"] = "release-100-rc22"
+        result = self.run_install("--geo", "activate", "/trust", "--")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("separate 1.1 project", result.stderr)
+        self.assertFalse(self.log.exists())
+
     def test_locale_is_only_forwarded_to_configure_and_uses_canonical_ids(self):
         for locale in ("en", "ru", "zh-Hans"):
             with self.subTest(locale=locale):

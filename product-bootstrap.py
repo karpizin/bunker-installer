@@ -335,7 +335,61 @@ def prepare_acceptance_service_paths(root: Path) -> None:
         path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IXOTH)
 
 
+def run_local_geo(action: str, trust: Path, cache: Path, ops_root: Path, options: list[str]) -> None:
+    if action not in {"activate", "recover", "restart"}:
+        raise BootstrapError("unsupported managed Geo action")
+    pinned_options = ("--manifest", "--signature", "--public-key")
+    if any(option == "--" or (option.startswith("--") and any(
+            flag.startswith(option.split("=", 1)[0]) for flag in pinned_options)) for option in options):
+        raise BootstrapError("Geo manifest, signature and key come only from the local trust directory")
+    if any(not path.is_absolute() or path == Path("/") or path.resolve() != path
+           for path in (trust, cache, ops_root)):
+        raise BootstrapError("Geo trust, cache and Ops roots must be canonical absolute directories")
+    names = ("release-1.1.0.json", "release-1.1.0.sig", "bunker-product-release-2026.pem")
+    with tempfile.TemporaryDirectory(prefix="bunker-geo-trust-") as directory:
+        snapshot = Path(directory)
+        for name in names:
+            source = trust / name
+            if source.is_symlink() or not source.is_file():
+                raise BootstrapError("local signed 1.1 Geo release files are required")
+            shutil.copyfile(source, snapshot / name)
+        manifest, signature, key = (snapshot / name for name in names)
+        verify_signature(manifest, signature, key)
+        item = ops_pin(manifest, "1.1.0")
+        archive = cache / str(item["path"])
+        if archive.resolve() != archive or not archive.is_file():
+            raise BootstrapError("the pinned Ops archive must already be in the local cache")
+        target = stage_ops(archive, item, ops_root)
+        script = target / "scripts/install/product-geo-service.py"
+        if not script.is_file() or script.is_symlink():
+            raise BootstrapError("verified Ops source lacks the managed Geo command")
+        subprocess.run([
+            sys.executable, "-B", str(script), action,
+            "--manifest", str(manifest), "--signature", str(signature), "--public-key", str(key), *options,
+        ], check=True)
+
+
+def geo_entry(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="product-bootstrap.py --geo", allow_abbrev=False)
+    parser.add_argument("action", choices=("activate", "recover", "restart"))
+    parser.add_argument("--trust-dir", type=Path, required=True)
+    parser.add_argument("--ops-cache", type=Path, required=True)
+    parser.add_argument("--ops-root", type=Path, required=True)
+    if "--" not in argv:
+        parser.error("separate the managed Geo options with --")
+    split = argv.index("--")
+    args = parser.parse_args(argv[:split])
+    try:
+        run_local_geo(args.action, args.trust_dir, args.ops_cache, args.ops_root, argv[split + 1:])
+    except (BootstrapError, OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
+        print(f"Bunker AI Geo bootstrap: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> int:
+    if sys.argv[1:2] == ["--geo"]:
+        return geo_entry(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest-url", required=True)
     parser.add_argument("--signature-url", required=True)

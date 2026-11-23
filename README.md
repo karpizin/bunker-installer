@@ -59,3 +59,21 @@ GPU ownership**. Do not activate the candidate concurrently with a working
 installation: first preserve its recovery evidence, stop it in a controlled
 maintenance window, and verify rollback. A successful `--prepare` alone is
 not acceptance of activation.
+
+## Managed geography (1.1 development only)
+
+The development bundle accepts `--geo activate|recover|restart TRUST_DIR -- [Geo options]`.
+`TRUST_DIR` must contain the local signed 1.1 manifest (`release-1.1.0.json`),
+its detached signature (`release-1.1.0.sig`) and the pinned product public key
+(`bunker-product-release-2026.pem`). The corresponding Ops archive must already
+be in the 1.1 cache at the manifest's pinned path. This command does not fetch
+trust files, Ops or content. It runs only the managed Geo command from the
+verified Ops archive.
+
+Prepare a signed selection and staged Geo generation first. Supply only the
+trusted Compose definition, private module environment and dedicated Geo
+project. An update and its recovery require the original rollback manifest,
+signature, profile and cache. Use `restart` for the already-selected profile;
+it refuses a pending switch rather than changing the selector. Do not use
+this command on a 1.0 acceptance root or on an unmanaged service. This is
+not a clean offline installer and is not shipped as part of 1.0.0.
