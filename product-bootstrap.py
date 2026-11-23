@@ -550,7 +550,7 @@ def geo_entry(argv: list[str]) -> int:
     return 0
 
 
-BASE_PROFILE_ACTIONS = ("setup-index", "start-voice", "start-operator", "verify-chat")
+BASE_PROFILE_ACTIONS = ("setup-index", "start-voice", "start-operator", "verify-chat", "attach-chat")
 
 
 def run_prepared_wikipedia(action: str, profile_id: str, rollback_id: str | None, cache: Path,
