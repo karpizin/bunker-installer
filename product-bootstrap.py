@@ -550,12 +550,15 @@ def geo_entry(argv: list[str]) -> int:
     return 0
 
 
+BASE_PROFILE_ACTIONS = ("setup-index", "start-voice", "start-operator", "verify-chat")
+
+
 def run_prepared_wikipedia(action: str, profile_id: str, rollback_id: str | None, cache: Path,
                            ops_root: Path, acceptance_id: str) -> None:
-    if (action not in {"activate", "recover", "setup-index", "start-voice", "start-operator"}
+    if (action not in ("activate", "recover", *BASE_PROFILE_ACTIONS)
             or not re.fullmatch(r"release-110-[a-z0-9][a-z0-9-]{0,51}", acceptance_id)):
         raise BootstrapError("managed Wikipedia requires a lowercase release-110-* acceptance ID and a valid action")
-    if action in {"setup-index", "start-voice", "start-operator"} and rollback_id is not None:
+    if action in BASE_PROFILE_ACTIONS and rollback_id is not None:
         raise BootstrapError("base setup does not accept a rollback profile")
     root = acceptance_profile_root(cache, ops_root, acceptance_id)
     bundle = prepared_profile_files(root, profile_id)
@@ -584,7 +587,7 @@ def run_prepared_wikipedia(action: str, profile_id: str, rollback_id: str | None
 
 def wikipedia_entry(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="product-bootstrap.py --wikipedia", allow_abbrev=False)
-    parser.add_argument("action", choices=("activate", "recover", "setup-index", "start-voice", "start-operator"))
+    parser.add_argument("action", choices=("activate", "recover", *BASE_PROFILE_ACTIONS))
     parser.add_argument("--acceptance-id", required=True)
     parser.add_argument("--prepared-profile", required=True)
     parser.add_argument("--rollback-prepared")
