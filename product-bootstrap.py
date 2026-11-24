@@ -23,6 +23,8 @@ MAX_OPS_BYTES = 1024 * 1024 * 1024
 RELEASE_SCHEMAS = {"1.0.0": "bunker.appliance-release/v1", "1.1.0": "bunker.appliance-release/v2"}
 CONFIGURE_CANCELLED = 3
 ACCEPTANCE_HOME = Path("/var/lib/bunker-acceptance-11")
+CANDIDATE_PERMIT = "candidate-manifest.sha256"
+CANDIDATE_OWNER = 0
 PROFILE_ID = re.compile(r"[0-9a-f]{64}")
 TRUST_FILES = ("release-1.1.0.json", "release-1.1.0.sig", "bunker-product-release-2026.pem")
 OFFLINE_TRUST_LIMITS = (2 << 20, 64 << 10, 64 << 10)
@@ -89,18 +91,32 @@ def verify_signature(manifest: Path, signature: Path, public_key: Path) -> None:
         raise BootstrapError("product manifest signature verification failed") from error
 
 
-def ops_pin(manifest: Path, release_version: str = "1.0.0") -> dict[str, object]:
-    value = json.loads(manifest.read_text(encoding="utf-8"))
+def ops_pin(manifest: Path, release_version: str = "1.0.0", *,
+            acceptance_root: Path | None = None) -> dict[str, object]:
+    raw = manifest.read_bytes()
+    value = json.loads(raw)
     if not isinstance(value, dict):
         raise BootstrapError("signed file is not a product manifest")
     platform_release = value.get("platform_release")
     distribution = value.get("distribution")
     if (release_version not in RELEASE_SCHEMAS
             or value.get("schema_version") != RELEASE_SCHEMAS[release_version]
-            or value.get("status") != "production"
             or not isinstance(platform_release, dict)
             or platform_release.get("version") != release_version):
         raise BootstrapError(f"signed file is not a production Bunker AI {release_version} manifest")
+    if value.get("status") != "production":
+        tag = platform_release.get("tag")
+        if (release_version != "1.1.0" or value.get("status") != "release_candidate"
+                or not isinstance(tag, str) or not re.fullmatch(r"v1\.1\.0-rc[1-9][0-9]*", tag)
+                or acceptance_root is None
+                or not acceptance_root.name.startswith(f"release-110-{tag.removeprefix('v1.1.0-')}-")
+                or "delivery_profiles" not in value or "delivery_plan" in value
+                or value.get("acceptance") != {"status": "not_run"}
+                or candidate_permit(acceptance_root) != hashlib.sha256(raw).hexdigest()):
+            raise BootstrapError("signed file is not a production release or an authorized private candidate")
+        check_profile_paths(manifest)
+        if manifest.resolve() != manifest or not manifest.is_relative_to(acceptance_root):
+            raise BootstrapError("candidate trust must stay in its acceptance root")
     if release_version == "1.1.0":
         catalog = value.get("installation_catalog")
         if not isinstance(catalog, dict) or catalog.get("schema_version") != "bunker.install-catalog/v2":
@@ -249,6 +265,7 @@ def configure_product(manifest_url: str, signature_url: str, public_key_url: str
         raise BootstrapError("space root and disk layout cannot be combined")
     if locale is not None and locale not in ("en", "ru", "zh-Hans"):
         raise BootstrapError("unsupported installer locale")
+    root = None
     if any(path.is_relative_to(ACCEPTANCE_HOME) for path in (cache, ops_root, profile)):
         try:
             identifier = cache.relative_to(ACCEPTANCE_HOME).parts[0]
@@ -266,10 +283,19 @@ def configure_product(manifest_url: str, signature_url: str, public_key_url: str
             # Dedicated service users need traversal without permission to list other candidates.
             ACCEPTANCE_HOME.chmod(0o751)
     # Keep this run's signature and catalog together even when another selection runs concurrently.
-    with tempfile.TemporaryDirectory(prefix="bunker-selection-trust-") as directory:
+    candidate = root is not None and candidate_permit(root) is not None
+    with trust_snapshot("bunker-selection-trust-", root if candidate else None) as directory:
         trust = Path(directory)
-        target = bootstrap(manifest_url, signature_url, public_key_url, cache, ops_root,
-                           release_version="1.1.0", private_trust=trust)
+        if candidate:
+            if probe_download:
+                raise BootstrapError("private candidate configuration requires local inputs")
+            if space_root is None and disk_layout is None:
+                space_root = root
+            min_free_after_bytes = max(min_free_after_bytes, PROFILE_FREE_FLOOR)
+            target = offline_profile_source(manifest_url, cache, trust, ops_root, acceptance_root=root)
+        else:
+            target = bootstrap(manifest_url, signature_url, public_key_url, cache, ops_root,
+                               release_version="1.1.0", private_trust=trust)
         script = target / "scripts/install/product-setup.py"
         if not script.is_file() or script.is_symlink():
             raise BootstrapError("verified Ops source lacks the 1.1 selection tool")
@@ -353,6 +379,29 @@ def check_profile_paths(*paths: Path) -> None:
                 break
 
 
+def candidate_permit(root: Path) -> str | None:
+    permit = root / CANDIDATE_PERMIT
+    if not os.path.lexists(permit):
+        return None
+    if (root.parent != ACCEPTANCE_HOME or root.resolve() != root
+            or not re.fullmatch(r"release-110-rc[1-9][0-9]*-[a-z0-9][a-z0-9-]*", root.name)):
+        raise BootstrapError("candidate permit requires a dedicated RC acceptance root")
+    check_profile_paths(root)
+    with os.fdopen(os.open(permit, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        digest = stream.read(66)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != CANDIDATE_OWNER or info.st_mode & 0o077
+                or info.st_nlink != 1 or not re.fullmatch(rb"[0-9a-f]{64}\n", digest)):
+            raise BootstrapError("candidate permit must be a private, root-owned manifest SHA-256")
+        return digest[:-1].decode("ascii")
+
+
+def trust_snapshot(prefix: str, candidate_root: Path | None = None) -> tempfile.TemporaryDirectory:
+    if candidate_root is None:
+        return tempfile.TemporaryDirectory(prefix=prefix)
+    return tempfile.TemporaryDirectory(prefix="bunker-candidate-trust-", dir=candidate_root)
+
+
 def read_offline_metadata(path: Path, limit: int) -> bytes:
     if path.resolve() != path or not path.is_file():
         raise BootstrapError(f"offline metadata is missing or linked: {path.name}")
@@ -430,7 +479,7 @@ def import_media_ops(source: Path, archive: Path, pin: dict[str, object]) -> Non
 
 
 def offline_profile_source(manifest_url: str, cache: Path, trust: Path, ops_root: Path,
-                           media_root: Path | None = None) -> Path:
+                           media_root: Path | None = None, *, acceptance_root: Path | None = None) -> Path:
     distribution = cache if media_root is None else media_root / "distribution"
     cached = tuple(distribution / "trust" / name for name in TRUST_FILES)
     if media_root is None:
@@ -441,7 +490,7 @@ def offline_profile_source(manifest_url: str, cache: Path, trust: Path, ops_root
         (trust / source.name).write_bytes(read_offline_metadata(source, limit))
     manifest, signature, key = (trust / name for name in TRUST_FILES)
     verify_signature(manifest, signature, key)
-    pin = ops_pin(manifest, "1.1.0")
+    pin = ops_pin(manifest, "1.1.0", acceptance_root=acceptance_root)
     release = json.loads(manifest.read_bytes())
     requested_tag = Path(urlsplit(https_url(manifest_url)).path).parent.name
     if release["platform_release"].get("tag") != requested_tag:
@@ -453,7 +502,8 @@ def offline_profile_source(manifest_url: str, cache: Path, trust: Path, ops_root
     return stage_ops(archive, pin, ops_root)
 
 
-def verified_kit(target: Path, media_root: Path, scope: str, profile_sha: str) -> str:
+def verified_kit(target: Path, media_root: Path, scope: str, profile_sha: str, *,
+                 reviewed_trust: Path | None = None) -> str:
     script = target / "scripts/release/verify-11-offline-kit.py"
     if not script.is_file() or script.is_symlink():
         raise BootstrapError("verified Ops source lacks the 1.1 signed kit verifier")
@@ -461,6 +511,8 @@ def verified_kit(target: Path, media_root: Path, scope: str, profile_sha: str) -
     expected = hashlib.sha256(raw).hexdigest()
     check = [sys.executable, "-B", str(script), "verify", "--media-root", str(media_root),
              "--scope", scope, "--profile-sha256", profile_sha]
+    if reviewed_trust is not None:
+        check += ["--reviewed-trust", str(reviewed_trust)]
     result = json.loads(subprocess.check_output(check, text=True))
     if (not isinstance(result, dict) or result.get("signed") is not True or result.get("installed") is not False
             or result.get("scope") != scope or result.get("manifest_sha256") != expected):
@@ -490,6 +542,9 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
                     cache: Path, ops_root: Path, acceptance_id: str, *, offline: bool = False,
                     media_root: Path | None = None, kit_profile_sha256: str | None = None) -> None:
     root = acceptance_profile_root(cache, ops_root, acceptance_id)
+    candidate = candidate_permit(root) is not None
+    if candidate and not offline:
+        raise BootstrapError("private candidate preparation requires --offline")
     if media_root is not None and (not offline or not media_root.is_absolute() or media_root == Path("/")
                                    or media_root.resolve() != media_root or not media_root.is_dir()
                                    or media_root.is_relative_to(root) or root.is_relative_to(media_root)):
@@ -526,10 +581,11 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
     else:
         profile_raw = profile.read_bytes()
 
-    with tempfile.TemporaryDirectory(prefix="bunker-profile-trust-") as directory:
+    with trust_snapshot("bunker-profile-trust-", root if candidate else None) as directory:
         trust = Path(directory)
         if offline:
-            target = offline_profile_source(manifest_url, cache, trust, ops_root, media_root)
+            target = offline_profile_source(manifest_url, cache, trust, ops_root, media_root,
+                                            **({"acceptance_root": root} if candidate else {}))
         else:
             target = bootstrap(manifest_url, signature_url, public_key_url, cache, ops_root,
                                release_version="1.1.0", private_trust=trust)
@@ -556,7 +612,8 @@ def prepare_profile(manifest_url: str, signature_url: str, public_key_url: str,
         if kit_profile_sha256 is not None:
             if scope not in ("base", "full"):
                 raise BootstrapError("a signed kit requires an explicit Basic or Full selection")
-            kit_manifest_sha = verified_kit(target, media_root, scope, profile_id)
+            kit_manifest_sha = verified_kit(target, media_root, scope, profile_id,
+                                            **({"reviewed_trust": trust} if candidate else {}))
         script = target / "scripts/install/product-11-prepare.py"
         if not script.is_file() or script.is_symlink():
             raise BootstrapError("verified Ops source lacks the 1.1 profile preparation tool")
@@ -630,7 +687,8 @@ def prepare_acceptance_service_paths(root: Path) -> None:
         path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IXOTH)
 
 
-def run_local_geo(action: str, trust: Path, cache: Path, ops_root: Path, options: list[str]) -> None:
+def run_local_geo(action: str, trust: Path, cache: Path, ops_root: Path, options: list[str], *,
+                  acceptance_root: Path | None = None) -> None:
     if action not in {"activate", "recover", "restart"}:
         raise BootstrapError("unsupported managed Geo action")
     pinned_options = ("--manifest", "--signature", "--public-key")
@@ -641,7 +699,8 @@ def run_local_geo(action: str, trust: Path, cache: Path, ops_root: Path, options
            for path in (trust, cache, ops_root)):
         raise BootstrapError("Geo trust, cache and Ops roots must be canonical absolute directories")
     names = TRUST_FILES
-    with tempfile.TemporaryDirectory(prefix="bunker-geo-trust-") as directory:
+    candidate_root = acceptance_root if acceptance_root is not None and candidate_permit(acceptance_root) else None
+    with trust_snapshot("bunker-geo-trust-", candidate_root) as directory:
         snapshot = Path(directory)
         for name in names:
             source = trust / name
@@ -650,7 +709,7 @@ def run_local_geo(action: str, trust: Path, cache: Path, ops_root: Path, options
             shutil.copyfile(source, snapshot / name)
         manifest, signature, key = (snapshot / name for name in names)
         verify_signature(manifest, signature, key)
-        item = ops_pin(manifest, "1.1.0")
+        item = ops_pin(manifest, "1.1.0", acceptance_root=candidate_root)
         archive = cache / str(item["path"])
         if archive.resolve() != archive or not archive.is_file():
             raise BootstrapError("the pinned Ops archive must already be in the local cache")
@@ -689,7 +748,8 @@ def run_prepared_geo(action: str, profile_id: str, cache: Path, ops_root: Path,
     run_local_geo(action, bundle, cache, ops_root,
                   ["--profile", str(bundle / "selection.json"), "--cache-root", str(paths["cache-root"]),
                    "--content-root", str(paths["geo-content-root"]), "--min-free-after-bytes", str(80 * 1024**3),
-                   *previous, *(option for option in options if option not in rollback)])
+                   *previous, *(option for option in options if option not in rollback)],
+                  **({"acceptance_root": root} if candidate_permit(root) is not None else {}))
 
 
 def geo_entry(argv: list[str]) -> int:
@@ -739,7 +799,7 @@ def run_prepared_wikipedia(action: str, profile_id: str, rollback_id: str | None
     check_profile_paths(cache, ops_root)
     manifest, signature, key = (bundle / name for name in TRUST_FILES)
     verify_signature(manifest, signature, key)
-    item = ops_pin(manifest, "1.1.0")
+    item = ops_pin(manifest, "1.1.0", acceptance_root=root)
     archive = cache / str(item["path"])
     check_profile_paths(archive)
     if not archive.is_file():

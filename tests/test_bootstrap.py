@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import shutil
 import stat
 import subprocess
@@ -283,6 +284,52 @@ print(json.dumps(result))
                             with self.assertRaisesRegex(bootstrap.BootstrapError, "scope is not supported"):
                                 bootstrap.prepare_profile(*self.arguments[:3], cache, ops, root.name)
                             stage.assert_not_called()
+
+    def test_private_candidate_is_only_prepared_from_exact_local_signed_bytes(self):
+        trust, archive = self.local_geo_fixture("product-11-prepare.py", b"""import json, sys
+from pathlib import Path
+args = sys.argv[1:]
+args.remove("--offline")
+opts = dict(zip(args[::2], args[1::2]))
+assert Path(opts["--manifest"]).parent.name.startswith("bunker-candidate-trust-")
+print(json.dumps({"ok": True, "offline": True, "activated": False, "platform_inputs": {"transport_only": True}}))
+""")
+        manifest, signature = (trust / name for name in bootstrap.TRUST_FILES[:2])
+        release = json.loads(manifest.read_bytes())
+        release.update(status="release_candidate", acceptance={"status": "not_run"}, delivery_profiles={})
+        release["platform_release"]["tag"] = "v1.1.0-rc1"
+        manifest.write_text(json.dumps(release))
+        subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(self.private),
+                        "-out", str(signature), str(manifest)], check=True)
+        root = self.root / "release-110-rc1-base"
+        cache, ops = root / "var/cache/bunker-ai/1.1.0", root / "opt/bunker/selection-releases"
+        profile = root / "var/lib/bunker-installer/1.1.0/selection.json"
+        profile.parent.mkdir(parents=True)
+        digest = bootstrap.sha256(manifest)
+        profile.write_text(json.dumps({"release_manifest_sha256": digest, "selection": {"scope": "base"}}))
+        shutil.copytree(trust, cache / "trust")
+        cached_archive = cache / release["distribution"]["ops_source"]["path"]
+        cached_archive.parent.mkdir()
+        shutil.copyfile(archive, cached_archive)
+        url = "https://example.invalid/v1.1.0-rc1/release-1.1.0.json"
+        with patch.object(bootstrap, "ACCEPTANCE_HOME", self.root), \
+                patch.object(bootstrap, "CANDIDATE_OWNER", os.getuid()), \
+                patch.object(bootstrap, "PRODUCT_KEY_FINGERPRINT", self.fingerprint), \
+                patch.object(bootstrap, "curl", side_effect=AssertionError("candidate used network")):
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "authorized private candidate"):
+                bootstrap.prepare_profile(url, "", "", cache, ops, root.name, offline=True)
+            permit = root / bootstrap.CANDIDATE_PERMIT
+            permit.write_text(digest + "\n")
+            permit.chmod(0o400)
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "requires --offline"):
+                bootstrap.prepare_profile(url, "", "", cache, ops, root.name)
+            with redirect_stdout(io.StringIO()) as output:
+                bootstrap.prepare_profile(url, "", "", cache, ops, root.name, offline=True)
+            self.assertTrue(json.loads(output.getvalue())["offline"])
+            permit.chmod(0o600)
+            permit.write_text("0" * 64 + "\n")
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "authorized private candidate"):
+                bootstrap.prepare_profile(url, "", "", cache, ops, root.name, offline=True)
 
     def test_offline_profile_replays_only_local_verified_inputs(self):
         trust, archive = self.local_geo_fixture("product-11-prepare.py", b"""import json, sys
